@@ -12,6 +12,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Fixed` for any bug fixes
 - `Security` in case of vulnerabilities
 
+## [0.9.0] - 2026-10-25
+
+Fork of [scenery-io/stallion](https://github.com/scenery-io/stallion) focused on
+making the bridge usable from automation tools (MCP servers, scripts) — see
+`Bridge protocol` in the README.
+
+### Added
+
+- **Result channel on `GET /get`**: script return values and errors are now
+  served over HTTP (via `api.WebServer.setResultForGet`). Posted scripts may
+  include a `seq` key; the served result echoes it so callers can match
+  requests to results. Results are delivered through a globalThis stash when
+  Cavalry shares the script context, and through a loopback `api.WebClient`
+  POST otherwise — whichever works in the running build.
+- **Status heartbeat**: before any script has run, `GET /get` serves
+  `{kind:"status", stallion, cavalry, scene, frame, unSaved, ts}`.
+- **Optional configuration file** `<Cavalry app data>/stallion.json` with
+  `host`, `port` and `token` keys (fixes the hardcoded-port known issue).
+- **Optional token authentication** (`token` in `stallion.json`) for both POST
+  and GET.
+- Expression/render application results now report `applied` and `skipped`
+  layer lists through the result channel.
+- Queued posts are drained in one callback tick instead of one per tick.
+
+### Changed
+
+- Error payloads for missing files, failed executions and unexpected types are
+  also served on the result channel — the fixed HTTP ack no longer hides
+  failures from HTTP clients.
+
 ## [0.8.0] - 2026-10-02
 
 ### Added

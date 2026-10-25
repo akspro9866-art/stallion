@@ -3,13 +3,13 @@
 	"name": "cavalry-bridge",
 	"displayName": "Stallion",
 	"description": "Scripting bridge for Cavalry",
-	"version": "0.8.0",
+	"version": "0.9.0",
 	"publisher": "Scenery",
 	"main": "./dist/extension.js",
 	"icon": "images/icon.png",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/scenery-io/stallion.git"
+		"url": "https://github.com/akspro9866-art/stallion.git"
 	},
 	"engines": {
 		"vscode": "^1.101.0"

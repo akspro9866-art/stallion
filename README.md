@@ -6,6 +6,11 @@
 
 VSCode extension to send scripts to [Cavalry](https://cavalry.scenegroup.co/).
 
+> **Fork notice** — this is a fork of [scenery-io/stallion](https://github.com/scenery-io/stallion)
+> (v0.8.0) extended for automation clients such as MCP servers. The additions are
+> additive and backwards compatible: the original POST protocol still works, and
+> `seq` is optional. See [Bridge protocol](#bridge-protocol-v09) below.
+
 ## Features
 
 -   Send scripts and Render scripts to Cavalry
@@ -13,6 +18,7 @@ VSCode extension to send scripts to [Cavalry](https://cavalry.scenegroup.co/).
 -   Insert Cavalry's Typescript definitions
 -   Installs the Stallion script automatically
 -   Functions as an API for other tools
+-   **(fork)** Results and errors served on `GET /get`, status heartbeat, configurable host/port, optional token auth
 
 ## Requirements
 
@@ -78,8 +84,23 @@ The VSCode extension exposes the following commands to the Command Palette (`Vie
 
 ## Known Issues
 
--   The server address and port are hardcoded (`127.0.0.1:8080`). Make sure nothing else is using this port.
 -   `ui.scriptLocation` returns a temporary path if the document in VSCode hasn't been saved.
+-   The server address and port default to `127.0.0.1:8080` but can now be overridden in `stallion.json` (see below).
+-   Saving or opening a scene resets Cavalry's script contexts, which stops Stallion — re-run `Scripts > Stallion` afterwards (a Cavalry-level limitation).
+
+## Configuration (optional)
+
+Create `<Cavalry app data>/stallion.json` (the folder returned by `api.getAppDataFolder()` — on Windows `%APPDATA%\Cavalry`, on macOS `~/Library/Application Support/Cavalry`):
+
+```json
+{
+	"host": "127.0.0.1",
+	"port": 8080,
+	"token": ""
+}
+```
+
+All keys are optional. A non-empty `token` enables token authentication for both `/post` and `/get` (`Authorization: Bearer <token>` header).
 
 ## Sending data to Stallion
 
@@ -89,7 +110,8 @@ While Stallion is open, send a `POST` request to `http://127.0.0.1:8080/post` wi
 {
 	"type": "",
 	"code": "",
-	"path": ""
+	"path": "",
+	"seq": ""
 }
 ```
 
@@ -123,6 +145,40 @@ The expression that should be applied to a layer—or the code that should be ex
 String. Required when sending UI scripts.
 
 The absolute path to a script. Mainly used for UI scripts so they're opened in their own window.
+
+### `seq`
+
+String or number. Optional.
+
+Echoed back in the result served on `GET /get` so callers can match a result to the request that produced it. Omit it for fire-and-forget execution (the VSCode extension does).
+
+## Bridge protocol (v0.9)
+
+`GET /get` always returns `text/plain` containing the latest JSON payload:
+
+```jsonc
+// Before any script has run — a heartbeat. Refreshed whenever the bridge is idle.
+{ "kind": "status", "stallion": "0.9.0", "cavalry": "2.8.0", "scene": "/path/to/scene.cv", "frame": 0, "unSaved": false, "ts": 1760000000000 }
+
+// After a script with seq "abc123" ran and returned 42
+{ "type": "__stallion_result__", "kind": "result", "seq": "abc123", "ok": true, "result": 42 }
+
+// After a script threw
+{ "type": "__stallion_result__", "kind": "result", "seq": "abc123", "ok": false, "error": "boom" }
+
+// After an expression-type post — per-layer outcome lists
+{ "kind": "result", "seq": "abc123", "ok": true, "applied": ["basicShape#1"], "skipped": ["Title"] }
+```
+
+Recommended client flow:
+
+1. `POST /post` with `{ "type": "script", "code": "…", "seq": "<uuid>" }`.
+2. Poll `GET /get` until the body parses as JSON with your `seq` (or a short timeout).
+3. Read `ok`, `result` / `error`.
+
+A result stays served until the next `POST` arrives — check `ts`/`seq` before trusting a cached body. Note that expression/render posts serve their outcome with the same mechanism.
+
+Results are captured by wrapping the posted code; the wrapper reports back through a `globalThis` stash (shared script contexts) and a loopback `api.WebClient` POST (isolated contexts), so the channel works on either engine behaviour. Scripts that post with `type` `"__stallion_result__"` are reserved for this internal channel.
 
 ## Sponsors
 
