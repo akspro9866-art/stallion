@@ -258,11 +258,12 @@ export class Callbacks {
 		const atomic = code.startsWith('/* cavalry-mcp:atomic */')
 			? code
 			: `(() => {
-	api.startUndoGroup('AI Motion Batch');
+	var __undo = typeof api.startUndoGroup === 'function';
+	if (__undo) api.startUndoGroup('AI Motion Batch');
 	try {
 		return (() => { ${code}\n})();
 	} finally {
-		api.endUndoGroup();
+		if (__undo) api.endUndoGroup();
 	}
 })()`
 		return `(function () {
