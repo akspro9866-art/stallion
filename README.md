@@ -178,7 +178,7 @@ Recommended client flow:
 
 A result stays served until the next `POST` arrives — check `ts`/`seq` before trusting a cached body. Note that expression/render posts serve their outcome with the same mechanism.
 
-Results are captured by wrapping the posted code; the wrapper reports back through a `globalThis` stash (shared script contexts) and a loopback `api.WebClient` POST (isolated contexts), so the channel works on either engine behaviour. Scripts that post with `type` `"__stallion_result__"` are reserved for this internal channel.
+Results are captured by wrapping the posted code; the wrapper reports back through a `globalThis` stash (shared script contexts) and a loopback `api.WebClient` POST (isolated contexts), so the channel works on either engine behaviour. Scripts execute in isolated IIFEs with `api.startUndoGroup("AI Motion Batch")` and `api.endUndoGroup()` in `try/finally`; errors include `error.toString()` and `stack`. Scripts that post with `type` `"__stallion_result__"` are reserved for this internal channel.
 
 ## Sponsors
 

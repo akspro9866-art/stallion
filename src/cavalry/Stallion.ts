@@ -15,7 +15,7 @@ server.listen(config.host, config.port)
 server.addCallbackObject(cb)
 server.setHighFrequency()
 if (config.token) {
-	server.setTokenAuthentication(config.token)
+	(server as unknown as { setTokenAuthentication(token: string): void }).setTokenAuthentication(config.token)
 	console.warn('Stallion: token authentication enabled via stallion.json')
 }
 

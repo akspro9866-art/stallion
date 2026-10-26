@@ -31,6 +31,7 @@ function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {
     tokenAuth: null,
     clientPosts: [],
     selected: ['basicShape#1'],
+    undo: [],
   }
   let callbackObject = null
   const server = {
@@ -79,6 +80,8 @@ function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {
     get: () => true,
     getRenderQueueItems: () => ['renderQueueItem#1'],
     create: (type) => `${type}#9`,
+    startUndoGroup: (name) => state.undo.push(`start:${name}`),
+    endUndoGroup: () => state.undo.push('end'),
   }
   const ui = {
     Label: class { setAlignment() {} },
@@ -153,7 +156,9 @@ const served = (m) => JSON.parse(m.state.served)
   const r = served(m)
   assert.equal(r.ok, false)
   assert.match(r.error, /boom/)
-  console.log('✔ script errors captured into the result channel')
+  assert.match(r.stack, /boom/)
+  assert.deepEqual(m.state.undo, ['start:AI Motion Batch', 'end'])
+  console.log('✔ script errors captured; Undo group closes in finally')
 }
 
 // 5. expression posts report applied/skipped

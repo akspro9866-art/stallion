@@ -1,0 +1,5 @@
+Preserve POST /post, GET /get, optional seq, and http://127.0.0.1:8080 compatibility.
+Wrap batched scripts in an isolated IIFE and one AI Motion Batch Undo group using try/finally.
+Return compact seq-matched structured results with exact errors and stacks.
+Do not break direct VS Code posts or legacy result-file clients.
+Automation clients must batch through cavalry_run_script or stallion-cli, never granular request loops.

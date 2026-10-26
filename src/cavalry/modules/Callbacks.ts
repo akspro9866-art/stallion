@@ -120,13 +120,13 @@ export class Callbacks {
 	}
 
 	onPost = (): void => {
-		this.#handlePost(safe(() => this.#server.getNextPost()))
+		this.#handlePost(safe(() => this.#server.getNextPost() as unknown as { result?: string } | null))
 		// Drain queued posts so bursts are not delayed one tick each.
 		let guard = 64
 		while (guard-- > 0) {
 			const count = safe(() => this.#server.postCount() as unknown as number)
 			if (typeof count !== 'number' || !Number.isFinite(count) || count < 1) break
-			this.#handlePost(safe(() => this.#server.getNextPost()))
+			this.#handlePost(safe(() => this.#server.getNextPost() as unknown as { result?: string } | null))
 		}
 	}
 
@@ -170,7 +170,7 @@ export class Callbacks {
 					console.error(`Stallion: No script found at ${path}`)
 					return
 				}
-				const success = ui.runFileScript(path)
+				const success = ui.runFileScript(path) as unknown as boolean
 				if (success) {
 					this.#serve({ kind: 'result', seq, ok: true, note: 'file script executed (no captured result)' })
 					console.log('Stallion: Script successfully executed')
@@ -255,6 +255,16 @@ export class Callbacks {
 		const origin = `http://${this.#config.host}:${this.#config.port}`
 		const token = this.#config.token
 		const seqLiteral = JSON.stringify(seq) ?? 'undefined'
+		const atomic = code.startsWith('/* cavalry-mcp:atomic */')
+			? code
+			: `(() => {
+	api.startUndoGroup('AI Motion Batch');
+	try {
+		return (() => { ${code}\n})();
+	} finally {
+		api.endUndoGroup();
+	}
+})()`
 		return `(function () {
 var __deliver = function (payload) {
 	try { globalThis.${RESULT_STASH} = payload; } catch (e) {}
@@ -267,12 +277,13 @@ var __deliver = function (payload) {
 var __out = { type: ${JSON.stringify(RESULT_TYPE)}, kind: 'result', seq: ${seqLiteral}, ok: true };
 try {
 	var __result;
-	var __returned = (function () { ${code} \n})();
+	var __returned = ${atomic};
 	if (typeof __result === 'undefined') __result = __returned;
 	if (typeof __result !== 'undefined') __out.result = __result;
-} catch (e) {
+} catch (err) {
 	__out.ok = false;
-	__out.error = String(e && e.message ? e.message : e);
+	__out.error = err.toString();
+	__out.stack = err.stack;
 }
 var __json;
 try { __json = JSON.stringify(__out); } catch (e2) {
