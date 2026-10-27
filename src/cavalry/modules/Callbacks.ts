@@ -39,6 +39,7 @@ interface PostPayload {
 	code?: string
 	path?: string
 	seq?: unknown
+	statePath?: string
 }
 
 /** Run fn, returning null on any throw — bridge code must never die on reads. */
@@ -148,7 +149,7 @@ export class Callbacks {
 			return
 		}
 
-		const { type, code, path, seq } = parsed
+		const { type, code, path, seq, statePath } = parsed
 		if (!type && !path) {
 			console.error('Stallion: Missing/empty `type` key in request')
 			return
@@ -181,7 +182,7 @@ export class Callbacks {
 				return
 			}
 			if (code) {
-				const success = api.exec(SCRIPT_ID, this.#wrapped(code, seq))
+				const success = api.exec(SCRIPT_ID, this.#wrapped(code, seq, statePath))
 				this.#serveStashed(seq)
 				if (success) {
 					console.log('Stallion: Script successfully executed')
@@ -251,11 +252,23 @@ export class Callbacks {
 	 * to the bridge. The wrapper runs inside api.exec; it reports through a
 	 * globalThis stash and a loopback WebClient POST (see file header).
 	 */
-	#wrapped = (code: string, seq: unknown): string => {
+	/**
+	 * Wrap user code so its return value (or thrown error) is delivered back
+	 * to the bridge. The wrapper runs inside api.exec; it reports through a
+	 * globalThis stash and a loopback WebClient POST (see file header).
+	 *
+	 * After the atomic Undo group has closed, a compact execution snapshot is
+	 * written to `statePath` (or ~/.cavalry-mcp/last-execution-state.json).
+	 * Marked cavalry-mcp scripts already carry their own telemetry; for those
+	 * the snapshot is picked up from globalThis and attached to the envelope.
+	 */
+	#wrapped = (code: string, seq: unknown, statePath?: string): string => {
 		const origin = `http://${this.#config.host}:${this.#config.port}`
 		const token = this.#config.token
 		const seqLiteral = JSON.stringify(seq) ?? 'undefined'
-		const atomic = code.startsWith('/* cavalry-mcp:atomic */')
+		const statePathLiteral = JSON.stringify(statePath ?? '')
+		const isAtomic = code.startsWith('/* cavalry-mcp:atomic */')
+		const atomic = isAtomic
 			? code
 			: `(() => {
 	var __undo = typeof api.startUndoGroup === 'function';
@@ -266,6 +279,83 @@ export class Callbacks {
 		if (__undo) api.endUndoGroup();
 	}
 })()`
+		const telemetryInit = isAtomic
+			? ''
+			: `var __telemetry = (function () {
+	var __read = function (fn) { try { return fn(); } catch (e) { return null; } };
+	var __top = function () { var ids = __read(function () { return api.getCompLayers(true); }); return Array.isArray(ids) ? ids : []; };
+	var __before = __top();
+	var __started = Date.now();
+	var __snapshot = {
+		seq: ${seqLiteral}, status: 'ok', errorStack: null, createdLayerIds: [],
+		activeSelection: [], compInfo: null, boundingBoxes: {}, modifiedLayerIds: []
+	};
+	var __compInfo = function () {
+		var id = __read(function () { return api.getActiveComp(); });
+		if (!id) return null;
+		var fps = __read(function () { return api.get(id, 'fps'); });
+		var resolution = __read(function () { return api.get(id, 'resolution'); });
+		var startFrame = __read(function () { return api.get(id, 'startFrame'); });
+		var endFrame = __read(function () { return api.get(id, 'endFrame'); });
+		if (startFrame == null) startFrame = __read(function () { return api.getInFrame(id); });
+		if (endFrame == null) endFrame = __read(function () { return api.getOutFrame(id); });
+		var res = null;
+		if (Array.isArray(resolution)) res = [Number(resolution[0]) || 0, Number(resolution[1]) || 0];
+		else if (resolution && typeof resolution === 'object') res = [Number(resolution.x) || 0, Number(resolution.y) || 0];
+		return {
+			id: String(id), name: __read(function () { return api.getNiceName(id); }),
+			fps: fps == null ? null : Number(fps),
+			startFrame: startFrame == null ? null : Number(startFrame),
+			endFrame: endFrame == null ? null : Number(endFrame),
+			resolution: res, width: res ? res[0] : null, height: res ? res[1] : null
+		};
+	};
+	var __finalize = function () {
+		try {
+			var after = __top();
+			var seen = {};
+			for (var i = 0; i < __before.length; i++) seen[__before[i]] = true;
+			for (var j = 0; j < after.length; j++) if (!seen[after[j]]) __snapshot.createdLayerIds.push(after[j]);
+			__snapshot.activeSelection = __read(function () { return api.getSelection(); }) || [];
+			__snapshot.compInfo = __compInfo();
+			var ids = __snapshot.createdLayerIds.concat(__snapshot.activeSelection.filter(function (id) { return after.indexOf(id) >= 0; }));
+			var boxed = {};
+			for (var k = 0; k < ids.length && k < 50; k++) {
+				var id = ids[k];
+				if (boxed[id]) continue;
+				boxed[id] = true;
+				var bb = __read(function () { return api.getBoundingBox(id, true); });
+				if (bb && typeof bb === 'object') {
+					var box = { x: Number(bb.x) || 0, y: Number(bb.y) || 0, width: Number(bb.width) || 0, height: Number(bb.height) || 0 };
+					if (bb.centre) box.centre = { x: Number(bb.centre.x) || 0, y: Number(bb.centre.y) || 0 };
+					__snapshot.boundingBoxes[id] = box;
+				}
+			}
+			__snapshot.durationMs = Date.now() - __started;
+			__snapshot.writtenAt = new Date().toISOString();
+			try {
+				var folder = api.getFolderFromPath(__statePath);
+				if (folder && typeof api.makeFolder === 'function') __read(function () { return api.makeFolder(folder); });
+			} catch (e) {}
+			try {
+				api.writeToFile(__statePath, JSON.stringify(__snapshot), true);
+			} catch (writeErr) {
+				try { api.writeToFile(__statePath, JSON.stringify({ seq: ${seqLiteral}, status: __snapshot.status, errorStack: __snapshot.errorStack, writeFailed: String(writeErr) }), true); } catch (e) {}
+			}
+			try { globalThis.__stallionState = __snapshot; } catch (e) {}
+		} catch (e) {}
+	};
+	return { snapshot: __snapshot, finalize: __finalize };
+})()`
+		const telemetryFinish = isAtomic
+			? `try {
+	var __shared = globalThis.__stallionState;
+	if (__shared && __shared.seq === ${seqLiteral}) __state = __shared;
+} catch (e) {}`
+			: `if (__telemetry && __telemetry.finalize) {
+	__telemetry.finalize();
+	__state = __telemetry.snapshot;
+}`
 		return `(function () {
 var __deliver = function (payload) {
 	try { globalThis.${RESULT_STASH} = payload; } catch (e) {}
@@ -275,6 +365,13 @@ var __deliver = function (payload) {
 		__client.post('/post', payload, 'application/json');
 	} catch (e) {}
 };
+var __statePath = ${statePathLiteral};
+if (!__statePath) {
+	try { __statePath = api.getHomeFolder() + '/.cavalry-mcp/last-execution-state.json'; } catch (e) {}
+}
+var __state = null;
+${telemetryInit}
+if (typeof __telemetry !== 'undefined' && __telemetry && __telemetry.snapshot) __state = __telemetry.snapshot;
 var __out = { type: ${JSON.stringify(RESULT_TYPE)}, kind: 'result', seq: ${seqLiteral}, ok: true };
 try {
 	var __result;
@@ -285,6 +382,12 @@ try {
 	__out.ok = false;
 	__out.error = err.toString();
 	__out.stack = err.stack;
+	if (__state) { __state.status = 'error'; __state.errorStack = String(err.stack || err); }
+}
+${telemetryFinish}
+if (__state) {
+	if (__out.ok === false && __state.status !== 'error') { __state.status = 'error'; __state.errorStack = __out.stack || __out.error || null; }
+	__out.state = __state;
 }
 var __json;
 try { __json = JSON.stringify(__out); } catch (e2) {
