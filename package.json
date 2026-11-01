@@ -45,7 +45,7 @@
 		"vscode:prepublish": "cross-env NODE_ENV=production npm run build",
 		"publish": "npx @vscode/vsce publish",
 		"pretest": "cross-env NODE_ENV=production npm run build",
-		"test": "npm run lint && node test/bridge-protocol.mjs && node --test \"test/*.test.mjs\"",
+		"test": "npm run lint && node test/bridge-protocol.mjs && node test/run.mjs",
 		"test:vscode": "node ./test/runTest.js",
 		"lint": "eslint ."
 	},
