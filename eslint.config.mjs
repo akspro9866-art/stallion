@@ -53,7 +53,9 @@ export default tseslint.config(
 		},
 	},
 	{
-		files: ['test/**/*.{js,mjs,cjs}'],
+		// Mocha globals belong to the VS Code suite only; *.test.mjs files use
+		// node:test's own `test` import and must not see a mocha `test` global.
+		files: ['test/suite/**/*.{js,mjs,cjs}'],
 		languageOptions: {
 			sourceType: 'commonjs',
 			globals: {

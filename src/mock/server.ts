@@ -1,0 +1,465 @@
+/**
+ * Headless mock Stallion bridge (`--mock`).
+ *
+ * A dependency-free Node HTTP server that speaks the exact :8080 wire
+ * contract — POST /post (script | render-frames | internal loopback), GET
+ * /get (status heartbeat | result envelope), optional `seq` matching, Bearer
+ * token auth — against an in-memory scene graph instead of a live Cavalry
+ * instance. It exists so GitHub Actions CI can run the whole stack:
+ *
+ *   refclone → cavalry-mcp (injects `_mg`) → stallion --mock → synthetic frames
+ *
+ * Responses mirror the live bridge shape-for-shape, including the
+ * deterministic receipt (sceneStateHash / consoleDiagnostics / beatBBoxes)
+ * and the execution snapshot. render-frames additionally serves true inline
+ * buffers (base64 png_buffer / raw_rgba) which the live bridge cannot —
+ * Cavalry's scripting host has no binary readback — plus a literal
+ * POST /render-frames route that streams raw bytes when the caller asks for
+ * application/octet-stream.
+ */
+
+import http from 'node:http'
+import vm from 'node:vm'
+import path from 'node:path'
+import fs from 'node:fs'
+import { MockApi, type MockFrameBuffer } from './api.ts'
+import { MockScene, sceneDigest } from './scene.ts'
+import { encodePng, rasterizeFrame } from './raster.ts'
+
+export const MOCK_VERSION = '0.10.0'
+
+const RESULT_TYPE = '__stallion_result__'
+const RENDER_FRAMES_TYPE = 'render-frames'
+const MAX_BODY_BYTES = 32 * 1024 * 1024
+const MAX_INLINE_FRAMES = 64
+
+export interface MockServerOptions {
+	host?: string
+	port?: number
+	token?: string
+	strictSchema?: boolean
+	/** Echo captured console output to stderr (debugging aid, off in CI). */
+	verbose?: boolean
+}
+
+export interface MockServerHandle {
+	port: number
+	host: string
+	scene: MockScene
+	api: MockApi
+	lastFrames: () => MockFrameBuffer[]
+	close: () => Promise<void>
+}
+
+interface ConsoleEntry {
+	level: string
+	text: string
+}
+
+function bearerOk(request: http.IncomingMessage, token: string): boolean {
+	if (!token) return true
+	const header = request.headers.authorization ?? ''
+	return header === `Bearer ${token}`
+}
+
+function readBody(request: http.IncomingMessage): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const chunks: Buffer[] = []
+		let size = 0
+		request.on('data', (chunk: Buffer) => {
+			size += chunk.length
+			if (size > MAX_BODY_BYTES) {
+				reject(new Error('request body too large'))
+				request.destroy()
+				return
+			}
+			chunks.push(chunk)
+		})
+		request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+		request.on('error', reject)
+	})
+}
+
+/** Execute script code against the mock scene in a fresh vm context. */
+export function executeOnMock(
+	code: string,
+	api: MockApi,
+	options: { verbose?: boolean } = {},
+): { result: unknown; error: string | null; stack: string | null; console: ConsoleEntry[]; state: Record<string, unknown> | null } {
+	const entries: ConsoleEntry[] = []
+	const sandboxConsole = {
+		log: (...args: unknown[]) => entries.push({ level: 'log', text: args.map(String).join(' ') }),
+		info: (...args: unknown[]) => entries.push({ level: 'info', text: args.map(String).join(' ') }),
+		warn: (...args: unknown[]) => entries.push({ level: 'warn', text: args.map(String).join(' ') }),
+		error: (...args: unknown[]) => entries.push({ level: 'error', text: args.map(String).join(' ') }),
+	}
+	const isAtomic = code.startsWith('/* cavalry-mcp:atomic */')
+	const trimmed = isAtomic ? code : `(function () {
+		if (typeof api.startUndoGroup === 'function') api.startUndoGroup('AI Motion Batch');
+		try {
+			return (function () { ${code}\n})();
+		} finally {
+			if (typeof api.endUndoGroup === 'function') api.endUndoGroup();
+		}
+	})()`
+	const before = new Set(api.scene.layers.keys())
+	const sandbox: Record<string, unknown> = {
+		api,
+		console: sandboxConsole,
+		__result: undefined,
+		__stallionState: undefined,
+		cavalry: {
+			versionLessThan: () => false,
+			Path: class {
+				d = ''
+				setD(d: string) {
+					this.d = String(d)
+					return this
+				}
+			},
+		},
+	}
+	let result: unknown
+	let error: string | null = null
+	let stack: string | null = null
+	try {
+		result = vm.runInNewContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, sandbox, {
+			timeout: 30_000,
+		})
+	} catch (err) {
+		const e = err as Error
+		error = String(e?.message ?? e)
+		stack = e?.stack ?? null
+	}
+	if (options.verbose && entries.length) {
+		for (const entry of entries) process.stderr.write(`[mock:${entry.level}] ${entry.text}\n`)
+	}
+	const createdLayerIds = [...api.scene.layers.keys()].filter((id) => !before.has(id))
+	const comp = api.scene.activeComp()
+	const boundingBoxes: Record<string, unknown> = {}
+	const receiptIds = [...new Set([...createdLayerIds, ...api.scene.selection])].slice(0, 50)
+	for (const id of receiptIds) {
+		const box = api.scene.boundingBox(id)
+		if (box) boundingBoxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, centre: box.centre }
+	}
+	const state = {
+		seq: null,
+		status: error ? 'error' : 'ok',
+		errorStack: stack,
+		createdLayerIds,
+		activeSelection: [...api.scene.selection],
+		compInfo: comp
+			? { id: comp.id, name: comp.name, fps: comp.fps, startFrame: comp.startFrame, endFrame: comp.endFrame, resolution: [comp.width, comp.height], width: comp.width, height: comp.height }
+			: null,
+		boundingBoxes,
+		durationMs: 0,
+		writtenAt: new Date().toISOString(),
+	}
+	if (api.scene.diagnostics.length) {
+		;(state as Record<string, unknown>).diagnostics = api.scene.diagnostics.slice()
+	}
+	return { result, error, stack, console: entries, state }
+}
+
+/** Deterministic receipt for the current scene state. */
+function buildReceipt(scene: MockScene, consoleEntries: ConsoleEntry[], receiptIds: string[], beatFrames: number[]): Record<string, unknown> {
+	const beatBBoxes: Record<string, unknown> = {}
+	const frames = beatFrames.slice(0, 32)
+	if (frames.length) {
+		const previous = scene.frame
+		try {
+			for (const frame of frames) {
+				scene.frame = frame
+				const boxes: Record<string, unknown> = {}
+				for (const id of receiptIds.slice(0, 50)) {
+					const box = scene.boundingBox(id)
+					const rotation = scene.layer(id) ? Number(scene.getAttr(scene.layer(id)!, 'rotation')) || 0 : 0
+					if (box) boxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, pivotX: box.centre.x, pivotY: box.centre.y, rotation }
+				}
+				beatBBoxes[String(frame)] = boxes
+			}
+		} finally {
+			scene.frame = previous
+		}
+	}
+	const facts = scene.facts()
+	const parts = facts.layers.map((l) => `${l.id}:${l.type}@k=${l.keyframes}`)
+	// Schema rejections and other scene diagnostics surface as warnings — the
+	// live bridge reports them through its console probe instead.
+	const diagnostics: ConsoleEntry[] = consoleEntries.slice(0, 64).map((e) => ({ level: e.level, text: e.text.slice(0, 240) }))
+	for (const entry of scene.diagnostics) {
+		if (diagnostics.length >= 64) break
+		diagnostics.push({ level: entry.level, text: entry.text.slice(0, 240) })
+	}
+	return {
+		sceneStateHash: sceneDigest(`nodes(${parts.join(';')})conn(${facts.connections.join(';')})`),
+		consoleDiagnostics: diagnostics,
+		beatBBoxes,
+	}
+}
+
+export function startMockServer(options: MockServerOptions = {}): Promise<MockServerHandle> {
+	const host = options.host ?? process.env.STALLION_HOST ?? '127.0.0.1'
+	const requestedPort = options.port ?? (Number(process.env.STALLION_PORT) || 8080)
+	const token = options.token ?? process.env.STALLION_TOKEN ?? ''
+	const scene = new MockScene({ strictSchema: options.strictSchema !== false })
+	const api = new MockApi(scene, {
+		render: (s, compId, frame, width, height) => rasterizeFrame(s, compId, frame, width, height),
+	})
+	let lastPayload: Record<string, unknown> | null = null
+	const queue: Promise<void> = Promise.resolve()
+
+	const heartbeat = (): Record<string, unknown> => ({
+		kind: 'status',
+		stallion: `${MOCK_VERSION}-mock`,
+		cavalry: '2.8.0-mock',
+		scene: 'mock://scene.cv',
+		frame: scene.frame,
+		unSaved: false,
+		capabilities: { receipt: true, renderFrames: true, mock: true },
+		ts: Date.now(),
+	})
+
+	const serveJson = (response: http.ServerResponse, payload: unknown, status = 200): void => {
+		const body = JSON.stringify(payload)
+		response.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+		response.end(body)
+	}
+
+	const handleRenderFrames = async (parsed: Record<string, unknown>): Promise<Record<string, unknown>> => {
+		const seq = parsed.seq
+		const rawFrames = Array.isArray(parsed.frames) ? parsed.frames : []
+		const frames = rawFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f))
+		if (!frames.length || frames.length > 2_000) {
+			return { type: RESULT_TYPE, kind: 'render-frames', seq, ok: false, error: 'render-frames requires 1..2000 frames' }
+		}
+		const resolutionScale = Number(parsed.resolutionScale)
+		const scale = Number.isFinite(resolutionScale) && resolutionScale > 0 ? Math.min(4, Math.max(0.01, resolutionScale)) : 0.5
+		const format = parsed.format === 'raw_rgba' ? 'raw_rgba' : 'png_buffer'
+		const compId = typeof parsed.compId === 'string' && parsed.compId ? parsed.compId : api.getActiveComp()
+		const comp = scene.comps.get(compId)
+		if (!comp) return { type: RESULT_TYPE, kind: 'render-frames', seq, ok: false, error: `no comp '${compId}'` }
+		const width = Math.max(1, Math.round(comp.width * scale))
+		const height = Math.max(1, Math.round(comp.height * scale))
+		const outDir = typeof parsed.outDir === 'string' && parsed.outDir.trim() ? path.resolve(parsed.outDir.trim()) : null
+		const previousFrame = scene.frame
+		const rendered: Array<Record<string, unknown>> = []
+		const failed: Array<Record<string, unknown>> = []
+		try {
+			for (const frame of frames) {
+				try {
+					scene.frame = frame
+					const raster = rasterizeFrame(scene, compId, frame, width, height)
+					const entry: Record<string, unknown> = { frame, width: raster.width, height: raster.height }
+					if (rendered.length < MAX_INLINE_FRAMES) {
+						const png = encodePng(raster.rgba, raster.width, raster.height)
+						entry.bytes = format === 'raw_rgba' ? raster.rgba.length : png.length
+						entry.bufferBase64 = (format === 'raw_rgba' ? raster.rgba : png).toString('base64')
+					} else {
+						entry.omitted = 'inline budget exhausted; raise outDir to write files instead'
+					}
+					if (outDir) {
+						fs.mkdirSync(outDir, { recursive: true })
+						const padded = String(frame).padStart(6, '0')
+						const file = path.join(outDir, `frame-${padded}.png`)
+						fs.writeFileSync(file, encodePng(raster.rgba, raster.width, raster.height))
+						entry.file = file
+					}
+					rendered.push(entry)
+				} catch (err) {
+					failed.push({ frame, error: String((err as Error)?.message ?? err) })
+				}
+			}
+		} finally {
+			scene.frame = previousFrame
+		}
+		return {
+			type: RESULT_TYPE,
+			kind: 'render-frames',
+			seq,
+			ok: rendered.length > 0,
+			format,
+			scale,
+			scalePercent: Math.round(scale * 100),
+			compId,
+			width,
+			height,
+			rendered,
+			failed,
+			receipt: buildReceipt(scene, [], [], []),
+		}
+	}
+
+	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const code = typeof parsed.code === 'string' ? parsed.code : ''
+		const statePath = typeof parsed.statePath === 'string' && parsed.statePath ? parsed.statePath : null
+		const pathOnly = typeof parsed.path === 'string' && parsed.path
+		if (pathOnly && !code) {
+			const exists = fs.existsSync(pathOnly)
+			return { type: RESULT_TYPE, kind: 'result', seq, ok: exists, ...(exists ? { note: 'file script executed (no captured result)' } : { error: `No script found at ${pathOnly}` }) }
+		}
+		if (!code) {
+			return { type: RESULT_TYPE, kind: 'result', seq, ok: false, error: 'Missing/empty `code` or `path` key in request' }
+		}
+		const beatFrames = Array.isArray(parsed.beatFrames) ? parsed.beatFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f)) : []
+		const ran = executeOnMock(code, api, { verbose: options.verbose })
+		const receiptIds = [
+			...new Set([...((ran.state.createdLayerIds as string[]) ?? []), ...((ran.state.activeSelection as string[]) ?? [])]),
+		]
+		const receipt = buildReceipt(scene, ran.console, receiptIds, beatFrames)
+		if (statePath) {
+			try {
+				fs.mkdirSync(path.dirname(statePath), { recursive: true })
+				fs.writeFileSync(statePath, JSON.stringify({ ...ran.state, seq, receipt }))
+			} catch {
+				// diagnostic write; never fail the execution for it
+			}
+		}
+		const envelope: Record<string, unknown> = { type: RESULT_TYPE, kind: 'result', seq, ok: ran.error === null }
+		if (ran.error !== null) {
+			envelope.error = ran.error
+			envelope.stack = ran.stack
+		} else if (typeof ran.result !== 'undefined') {
+			envelope.result = ran.result
+		}
+		envelope.receipt = receipt
+		envelope.state = { ...ran.state, seq, receipt }
+		return envelope
+	}
+
+	const server = http.createServer((request, response) => {
+		void (async () => {
+			const url = new URL(request.url ?? '/', 'http://localhost')
+			if (!bearerOk(request, token)) {
+				serveJson(response, { error: 'unauthorized' }, 401)
+				return
+			}
+			if (request.method === 'GET' && url.pathname === '/') {
+				const body = 'Stallion mock bridge — POST /post, GET /get, POST /render-frames\n'
+				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
+				response.end(body)
+				return
+			}
+			if (request.method === 'GET' && url.pathname === '/get') {
+				serveJson(response, lastPayload ?? heartbeat())
+				return
+			}
+			if (request.method === 'POST' && (url.pathname === '/post' || url.pathname === '/render-frames')) {
+				let body: string
+				try {
+					body = await readBody(request)
+				} catch (err) {
+					serveJson(response, { error: String((err as Error)?.message ?? err) }, 413)
+					return
+				}
+				let parsed: Record<string, unknown>
+				try {
+					parsed = JSON.parse(body) as Record<string, unknown>
+				} catch {
+					serveJson(response, { error: 'Failed to parse request as JSON' }, 400)
+					return
+				}
+				// Raw binary streaming for the literal render-frames route.
+				if (url.pathname === '/render-frames' && (request.headers.accept ?? '').includes('application/octet-stream')) {
+					const batch = await handleRenderFrames(parsed)
+					const rendered = Array.isArray(batch.rendered) ? (batch.rendered as Array<Record<string, unknown>>) : []
+					// Layout: u32 frame count, then per frame { u32 frame, u16 width,
+					// u16 height, u32 byteLength, bytes }.
+					const header = Buffer.alloc(4)
+					header.writeUInt32BE(rendered.length, 0)
+					const parts: Buffer[] = [header]
+					for (const item of rendered) {
+						const frameHeader = Buffer.alloc(8)
+						frameHeader.writeUInt32BE(Number(item.frame), 0)
+						frameHeader.writeUInt16BE(Number(item.width), 4)
+						frameHeader.writeUInt16BE(Number(item.height), 6)
+						const bytes = Buffer.from(String(item.bufferBase64 ?? ''), 'base64')
+						const size = Buffer.alloc(4)
+						size.writeUInt32BE(bytes.length, 0)
+						parts.push(frameHeader, size, bytes)
+					}
+					const payload = Buffer.concat(parts)
+					response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': payload.length })
+					response.end(payload)
+					return
+				}
+				const work = queue.then(async () => {
+					let envelope: Record<string, unknown>
+					if (parsed.type === RESULT_TYPE) {
+						// internal loopback channel — serve verbatim, like the live bridge
+						lastPayload = parsed
+						envelope = { ok: true }
+					} else if (parsed.type === RENDER_FRAMES_TYPE) {
+						envelope = await handleRenderFrames(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === 'script' || parsed.path) {
+						envelope = handleScriptPost(parsed)
+						lastPayload = envelope
+					} else {
+						envelope = { type: RESULT_TYPE, kind: 'result', seq: parsed.seq ?? null, ok: false, error: `Unexpected type '${String(parsed.type)}'` }
+						lastPayload = envelope
+					}
+					return envelope
+				})
+				try {
+					await work
+					// The live bridge answers POST with a fixed ack; results flow
+					// through GET /get, so the mock keeps that contract.
+					serveJson(response, { ok: true })
+				} catch (err) {
+					serveJson(response, { ok: false, error: String((err as Error)?.message ?? err) }, 500)
+				}
+				return
+			}
+			serveJson(response, { error: 'not found' }, 404)
+		})().catch(() => {
+			if (!response.headersSent) serveJson(response, { error: 'internal error' }, 500)
+		})
+	})
+
+	return new Promise((resolve, reject) => {
+		server.once('error', reject)
+		server.listen(requestedPort, host, () => {
+			const address = server.address()
+			const port = typeof address === 'object' && address ? address.port : requestedPort
+			resolve({
+				port,
+				host,
+				scene,
+				api,
+				lastFrames: () => api.lastFrames.slice(),
+				close: () =>
+					new Promise<void>((resolveClose) => {
+						server.close(() => resolveClose())
+					}),
+			})
+		})
+	})
+}
+
+/** CLI boot: `node dist/stallion-mock.js --mock [--port N] [--host H]`. */
+export function shouldBootMock(argv: string[] = process.argv): boolean {
+	if (argv.includes('--mock')) return true
+	return process.env.STALLION_MOCK === '1'
+}
+
+export async function bootMockFromArgv(argv: string[] = process.argv): Promise<void> {
+	const flag = (name: string, fallback?: string): string | undefined => {
+		const index = argv.indexOf(name)
+		return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback
+	}
+	const handle = await startMockServer({
+		host: flag('--host'),
+		port: flag('--port') ? Number(flag('--port')) : undefined,
+		token: flag('--token'),
+		strictSchema: !argv.includes('--lax'),
+		verbose: argv.includes('--verbose'),
+	})
+	process.stdout.write(`Stallion mock bridge v${MOCK_VERSION} — listening on ${handle.host}:${handle.port} (in-memory Cavalry 2.8 scene)\n`)
+	const shutdown = () => {
+		void handle.close().then(() => process.exit(0))
+	}
+	process.on('SIGINT', shutdown)
+	process.on('SIGTERM', shutdown)
+}

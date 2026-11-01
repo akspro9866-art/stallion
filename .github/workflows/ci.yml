@@ -1,0 +1,33 @@
+name: CI
+
+# The bridge is pure esbuild output — the protocol suite loads dist/Stallion.js
+# into a vm sandbox with a mock api, and the mock-bridge suite runs the
+# dist/stallion-mock.mjs HTTP server. Neither needs Cavalry or VS Code, so the
+# matrix covers both OSes across the supported Node range. The VS Code
+# extension-host suite stays out of CI (it needs a downloaded Electron build);
+# run it locally with `npm run test:vscode`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          NODE_ENV: production
+      - run: npm test

@@ -71,13 +71,20 @@ function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {
     },
     getCavalryVersion: () => '2.8.0-mock',
     getSceneFilePath: () => '/mock/scene.cv',
-    getFrame: () => 7,
+    getFrame: () => state.frame ?? 7,
+    setFrame: (f) => { state.frame = f },
     sceneHasUnsavedChanges: () => false,
     getSelection: () => state.selected,
+    getCompLayers: () => ['basicShape#1'],
+    getAnimatedAttributes: () => ['position.x'],
+    getKeyframeTimes: () => [0, 24],
+    getInConnectedAttributes: () => ['deformers'],
+    getBoundingBox: () => ({ x: 0, y: 0, width: 10, height: 20 }),
+    getPivotPosition: () => ({ x: 5, y: 10 }),
     getLayerType: (id) => id.split('#')[0],
     getNiceName: (id) => `name of ${id}`,
     set: () => true,
-    get: () => true,
+    get: () => undefined,
     getRenderQueueItems: () => ['renderQueueItem#1'],
     create: (type) => `${type}#9`,
     startUndoGroup: (name) => state.undo.push(`start:${name}`),
@@ -94,7 +101,7 @@ function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {
   const ctx = vm.createContext({ api, ui, cavalry, console })
   api.__realm = ctx // shared-context exec runs inside Stallion's own realm
   vm.runInContext(code, ctx)
-  return { state, tick: () => callbackObject.onPost(), post: (payload) => state.queue.push({ result: JSON.stringify(payload) }) }
+  return { state, api, tick: () => callbackObject.onPost(), post: (payload) => state.queue.push({ result: JSON.stringify(payload) }) }
 }
 
 const served = (m) => JSON.parse(m.state.served)
@@ -104,8 +111,10 @@ const served = (m) => JSON.parse(m.state.served)
   const m = makeMockApi()
   const s = served(m)
   assert.equal(s.kind, 'status')
-  assert.equal(s.stallion, '0.9.0')
+  assert.equal(s.stallion, '0.10.0')
   assert.equal(s.cavalry, '2.8.0-mock')
+  assert.equal(s.capabilities.receipt, true)
+  assert.equal(s.capabilities.renderFrames, true)
   assert.deepEqual(m.state.listenArgs, { host: '127.0.0.1', port: 8080 })
   assert.equal(m.state.tokenAuth, null)
   console.log('✔ status heartbeat served at startup')
@@ -187,6 +196,54 @@ const served = (m) => JSON.parse(m.state.served)
   assert.equal(r.result, 1)
   fs.rmSync(dir, { recursive: true, force: true })
   console.log('✔ stallion.json overrides port and enables token auth')
+}
+
+// 7. deterministic receipt: sceneStateHash + consoleDiagnostics + beatBBoxes
+{
+  const m = makeMockApi({ execMode: 'shared' })
+  m.post({
+    type: 'script',
+    code: 'console.warn("careful"); __result = "done";',
+    seq: 's6',
+    beatFrames: [12, 24],
+  })
+  m.tick()
+  const r = served(m)
+  assert.equal(r.ok, true)
+  const receipt = r.receipt
+  assert.match(receipt.sceneStateHash, /^[0-9a-f]{16}$/)
+  assert.equal(receipt.consoleDiagnostics.length, 1)
+  assert.equal(receipt.consoleDiagnostics[0].level, 'warn')
+  assert.equal(receipt.consoleDiagnostics[0].text, 'careful')
+  assert.deepEqual(Object.keys(receipt.beatBBoxes).sort(), ['12', '24'])
+  assert.equal(receipt.beatBBoxes['12']['basicShape#1'].width, 10)
+  // the playhead is restored after beat evaluation
+  assert.equal(m.state.frame, 7)
+  // an identical scene reads the same hash; a different scene would not
+  const hashA = receipt.sceneStateHash
+  m.post({ type: 'script', code: '__result = 1;', seq: 's6b' })
+  m.tick()
+  assert.equal(served(m).receipt.sceneStateHash, hashA)
+  console.log('✔ deterministic receipt: hash, console diagnostics, beat bboxes')
+}
+
+// 8. diagnostics probes record invalid attribute paths and dead connections
+{
+  const m = makeMockApi({ execMode: 'shared' })
+  m.api.getAttributeDefinition = (id, attr) => (attr === 'position.x' ? { name: attr } : null)
+  m.api.connect = () => {}
+  m.post({
+    type: 'script',
+    code: 'api.set("basicShape#1", { "bogus.attr": 1 }); api.connect("basicShape#1", "position.x", "ghost#2", "position.x"); __result = 1;',
+    seq: 's7',
+    diagnostics: true,
+  })
+  m.tick()
+  const r = served(m)
+  assert.ok(r.receipt.apiDiagnostics, 'expected apiDiagnostics on the receipt')
+  assert.ok(r.receipt.apiDiagnostics.invalidAttrs.some((entry) => entry.includes('bogus.attr')), JSON.stringify(r.receipt.apiDiagnostics))
+  assert.ok(r.receipt.apiDiagnostics.failedConnections.some((entry) => entry.includes('ghost#2')), JSON.stringify(r.receipt.apiDiagnostics))
+  console.log('✔ diagnostics probes surface invalid attrs and dead connections')
 }
 
 console.log('\nAll bridge protocol assertions passed.')

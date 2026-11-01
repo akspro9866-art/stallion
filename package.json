@@ -3,7 +3,7 @@
 	"name": "cavalry-bridge",
 	"displayName": "Stallion",
 	"description": "Scripting bridge for Cavalry",
-	"version": "0.9.0",
+	"version": "0.10.0",
 	"publisher": "Scenery",
 	"main": "./dist/extension.js",
 	"icon": "images/icon.png",
@@ -44,8 +44,9 @@
 		"build": "node ./scripts/build.ts",
 		"vscode:prepublish": "cross-env NODE_ENV=production npm run build",
 		"publish": "npx @vscode/vsce publish",
-		"pretest": "npm run lint",
-		"test": "node ./test/runTest.js",
+		"pretest": "cross-env NODE_ENV=production npm run build",
+		"test": "npm run lint && node test/bridge-protocol.mjs && node --test \"test/*.test.mjs\"",
+		"test:vscode": "node ./test/runTest.js",
 		"lint": "eslint ."
 	},
 	"prettier": {

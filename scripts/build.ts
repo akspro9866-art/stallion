@@ -25,22 +25,38 @@ const cavalryOptions: BuildOptions = {
 }
 
 const vscodeOptions: BuildOptions = {
-	...options,
-	entryPoints: ['./src/vscode/extension.ts'],
-	sourcemap: !production,
-	external: ['vscode'],
-	platform: 'node',
-	format: 'cjs',
+    ...options,
+    entryPoints: ['./src/vscode/extension.ts'],
+    sourcemap: !production,
+    external: ['vscode'],
+    platform: 'node',
+    format: 'cjs',
+}
+
+const mockOptions: BuildOptions = {
+    ...options,
+    outdir: undefined,
+    entryPoints: ['./src/node/mock-cli.ts'],
+    outfile: './dist/stallion-mock.mjs',
+    platform: 'node',
+    format: 'esm',
+    banner: {
+        js: [
+            '#!/usr/bin/env node',
+            `// VERSION ${pkg.version} (mock bridge)`,
+        ].join('\n'),
+    },
 }
 
 const cavalry = await context(cavalryOptions)
 const vscode = await context(vscodeOptions)
+const mock = await context(mockOptions)
 
 if (production) {
     rimraf(resolve(options.outdir))
-	await Promise.all([build(cavalryOptions), build(vscodeOptions)])
-	await Promise.all([cavalry.dispose(), vscode.dispose()])
+    await Promise.all([build(cavalryOptions), build(vscodeOptions), build(mockOptions)])
+    await Promise.all([cavalry.dispose(), vscode.dispose(), mock.dispose()])
 } else {
-	await Promise.all([cavalry.watch(), vscode.watch()])
+    await Promise.all([cavalry.watch(), vscode.watch(), mock.watch()])
 }
 

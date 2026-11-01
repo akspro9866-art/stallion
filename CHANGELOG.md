@@ -12,6 +12,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Fixed` for any bug fixes
 - `Security` in case of vulnerabilities
 
+## [0.10.0] - 2026-11-01
+
+Telemetry, batch frame verification, and a headless mock bridge for CI.
+
+### Added
+
+- **Deterministic post-execution receipt**: every script result now carries
+  `receipt: { sceneStateHash, consoleDiagnostics, beatBBoxes }`.
+  `sceneStateHash` is a fast deterministic dual-lane FNV-1a digest of active
+  node IDs, attribute connections and keyframe counts (identical scenes hash
+  identically; any mutation changes the hash). `consoleDiagnostics` captures
+  `console.warn`/`error`/`log` output raised while the script ran instead of
+  swallowing it. `beatBBoxes` re-measures world-space bounding boxes (plus
+  pivot and rotation) of the created/selected layers at the caller's
+  `beatFrames` and restores the playhead. Scripts may pass
+  `diagnostics: true` to also probe every `api.set` attribute path
+  (`getAttributeDefinition` + read-back) and every `api.connect` link
+  (endpoint existence + `getInConnection` read-back); failures land in
+  `receipt.apiDiagnostics`.
+- **Batch frame verification — `POST /post {type:"render-frames"}`**: one
+  bridge call renders a list of frames at verification resolution
+  (`resolutionScale`, default 0.5; `format: "png_buffer" | "raw_rgba"`) via
+  `api.renderPNGFrame`, then reports per-frame files, sizes and the comp
+  resolution. Playhead and active comp are always restored. The live bridge
+  reports file references (Cavalry's scripting host has no binary readback —
+  `raw_rgba` is acknowledged with an inline note); the mock bridge serves
+  real inline buffers.
+- **Headless mock bridge (`--mock`)**: `node dist/stallion-mock.mjs --mock`
+  (or `STALLION_MOCK=1`) boots the same wire contract against an in-memory
+  Cavalry 2.8 scene graph — schema-validated node/attribute calls with
+  recorded diagnostics, linear / weighted cubic Bézier / magic-easing
+  interpolation, undo groups, playhead, connections and a deterministic
+  software rasterizer that emits real PNG buffers for `render-frames`. The
+  mock also exposes a literal `POST /render-frames` route that streams raw
+  bytes when called with `Accept: application/octet-stream`, so CI can drive
+  the full stack (refclone → cavalry-mcp → stallion) without a GUI.
+- **CI**: first GitHub Actions workflow — build + ESLint + the protocol suite
+  + the mock-bridge suite on ubuntu/windows across Node 20/22/24. The VS Code
+  extension-host suite moved to `npm run test:vscode` (needs a real Electron
+  host, not CI-able headless).
+
+### Changed
+
+- `GET /get` status heartbeat now carries
+  `capabilities: { receipt, renderFrames, mock }` so clients can detect the
+  upgraded bridge.
+- The generated script wrapper restores the captured `console` methods even
+  when the script throws.
+
 ## [0.9.0] - 2026-10-25
 
 Fork of [scenery-io/stallion](https://github.com/scenery-io/stallion) focused on
