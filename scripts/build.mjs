@@ -1,30 +1,35 @@
-import { build, context, type BuildOptions } from 'esbuild'
-import pkg from '../package.json' with { type: 'json' }
+import { build, context } from 'esbuild'
+import { createRequire } from 'module'
 import { resolve } from 'path'
 import { rimraf } from 'rimraf'
 
+// Plain JS so the build runs on every Node version the CI matrix covers —
+// Node 20 cannot strip TypeScript from a directly executed script.
+const require = createRequire(import.meta.url)
+const pkg = require('../package.json')
+
 const production = process.env.NODE_ENV === 'production'
 
-const options: BuildOptions = {
+const options = {
     bundle: true,
     outdir: './dist',
     logLevel: 'info',
     minify: production,
 }
 
-const cavalryOptions: BuildOptions = {
+const cavalryOptions = {
     ...options,
-	entryPoints: ['./src/cavalry/Stallion.ts'],
-	banner: {
-		js: [
-			`// VERSION ${pkg.version}`,
-			'// This is the compiled version',
-			`// Read the source at ${pkg.repository.url}`,
-		].join('\n'),
-	},
+    entryPoints: ['./src/cavalry/Stallion.ts'],
+    banner: {
+        js: [
+            `// VERSION ${pkg.version}`,
+            '// This is the compiled version',
+            `// Read the source at ${pkg.repository.url}`,
+        ].join('\n'),
+    },
 }
 
-const vscodeOptions: BuildOptions = {
+const vscodeOptions = {
     ...options,
     entryPoints: ['./src/vscode/extension.ts'],
     sourcemap: !production,
@@ -33,7 +38,7 @@ const vscodeOptions: BuildOptions = {
     format: 'cjs',
 }
 
-const mockOptions: BuildOptions = {
+const mockOptions = {
     ...options,
     outdir: undefined,
     entryPoints: ['./src/node/mock-cli.ts'],
@@ -59,4 +64,3 @@ if (production) {
 } else {
     await Promise.all([cavalry.watch(), vscode.watch(), mock.watch()])
 }
-

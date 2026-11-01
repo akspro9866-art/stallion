@@ -41,7 +41,7 @@
 	},
 	"scripts": {
 		"dev": "cross-env NODE_ENV=development npm run build",
-		"build": "node ./scripts/build.ts",
+		"build": "node ./scripts/build.mjs",
 		"vscode:prepublish": "cross-env NODE_ENV=production npm run build",
 		"publish": "npx @vscode/vsce publish",
 		"pretest": "cross-env NODE_ENV=production npm run build",
