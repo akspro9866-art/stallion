@@ -22,9 +22,21 @@ import http from 'node:http'
 import vm from 'node:vm'
 import path from 'node:path'
 import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import { MockApi, type MockFrameBuffer } from './api.ts'
 import { MockScene, sceneDigest } from './scene.ts'
 import { encodePng, rasterizeFrame } from './raster.ts'
+import {
+	ERROR_CODES,
+	LAYERS_TYPE,
+	SNAPSHOT_TYPE,
+	STATE_TYPE,
+	errorEnvelope,
+	normalizeReadbackJob,
+	normalizeSnapshotJob,
+	readbackScript,
+	snapshotScript,
+} from '../cavalry/modules/Introspect.ts'
 
 export const MOCK_VERSION = '0.10.0'
 
@@ -54,6 +66,63 @@ export interface MockServerHandle {
 interface ConsoleEntry {
 	level: string
 	text: string
+}
+
+/**
+ * A `GET /state?frame=42&attrs=position.x,opacity` query into the same payload shape
+ * `POST /post` accepts, so both surfaces reach one handler and cannot drift apart.
+ * Unknown keys are ignored rather than rejected: a client asking for `?debug=1` should
+ * still get its scene back.
+ */
+function introspectQuery(url: URL, kind: 'state' | 'layers' | 'snapshot'): Record<string, unknown> {
+	const q = url.searchParams
+	const pick = (...names: string[]): string | null => {
+		for (const name of names) {
+			const value = q.get(name)
+			if (value !== null) return value
+		}
+		return null
+	}
+	const parsed: Record<string, unknown> = { type: kind, seq: pick('seq') ?? `get-${kind}-${Date.now()}` }
+	const frame = pick('frame', 't')
+	if (frame !== null) parsed.frame = frame
+	if (kind === 'snapshot') {
+		const scale = pick('scale', 'resolutionScale')
+		if (scale !== null) parsed.scale = scale
+		const outDir = pick('outDir', 'out')
+		if (outDir !== null) parsed.outDir = outDir
+		const fileName = pick('fileName', 'name')
+		if (fileName !== null) parsed.fileName = fileName
+	} else {
+		const offset = pick('offset')
+		if (offset !== null) parsed.offset = offset
+		const limit = pick('limit')
+		if (limit !== null) parsed.limit = limit
+		const budgetMs = pick('budgetMs', 'budget')
+		if (budgetMs !== null) parsed.budgetMs = budgetMs
+		const attrs = pick('attrs', 'attributes')
+		if (attrs !== null) {
+			// `?attrs=a,b` selects values; `?attributes=1` asks for every declared
+			// attribute instead, so the two spellings must not be conflated.
+			if (/^(1|true|yes)$/i.test(attrs)) parsed.attributes = true
+			else parsed.attrs = attrs.split(',').map((s) => s.trim()).filter(Boolean)
+		}
+	}
+	const comp = pick('comp', 'compId')
+	if (comp !== null) parsed.compId = comp
+	const mgCall = pick('mgCall')
+	if (mgCall !== null) parsed.mgCall = mgCall
+	return parsed
+}
+
+/**
+ * Should a snapshot answer carry inline pixels? `?inline=0` or `{inline:false}`
+ * turns them off: the file path, size and hashes are the contract, the bytes are a
+ * convenience for callers that would otherwise poll the disk.
+ */
+function inlineWanted(parsed: Record<string, unknown>, url: URL): boolean {
+	const value = parsed.inline ?? url.searchParams.get('inline') ?? '1'
+	return value !== false && !/^(0|false)$/i.test(String(value))
 }
 
 function bearerOk(request: http.IncomingMessage, token: string): boolean {
@@ -216,7 +285,15 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		scene: 'mock://scene.cv',
 		frame: scene.frame,
 		unSaved: false,
-		capabilities: { receipt: true, renderFrames: true, mock: true },
+		capabilities: {
+			receipt: true,
+			renderFrames: true,
+			// Same shape as the live heartbeat: introspection is a `type` on POST /post,
+			// and only the mock additionally answers GET /state, /layers and /frame.
+			introspect: ['state', 'layers', 'snapshot'],
+			errorEnvelope: 1,
+			mock: true,
+		},
 		ts: Date.now(),
 	})
 
@@ -290,6 +367,55 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		}
 	}
 
+	/**
+	 * Readback and snapshot run the *same* runtime source the live bridge hands to
+	 * `api.exec` — `readbackScript` / `snapshotScript` from Introspect.ts — through the
+	 * vm sandbox. That is the point: the script that ships inside Cavalry is the script
+	 * CI exercises headlessly, so a bug in the walk cannot hide behind a mock that
+	 * reimplements it in TypeScript.
+	 */
+	const runIntrospect = (
+		source: string,
+		kind: string,
+		parsed: Record<string, unknown>,
+	): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const ran = executeOnMock(source, api, { verbose: options.verbose })
+		if (ran.error !== null) {
+			return { ...errorEnvelope(kind, ERROR_CODES.EXEC_FAILED, ran.error, { seq, stack: ran.stack ?? undefined }) }
+		}
+		const inner = typeof ran.result === 'object' && ran.result !== null ? (ran.result as Record<string, unknown>) : {}
+		return { type: RESULT_TYPE, kind, seq, ...inner, ok: inner.ok !== false }
+	}
+
+	const handleReadbackPost = (kind: 'state' | 'layers', parsed: Record<string, unknown>): Record<string, unknown> => {
+		const job = normalizeReadbackJob(kind, parsed)
+		return runIntrospect(readbackScript(job), kind, parsed)
+	}
+
+	const handleSnapshotPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const normalized = normalizeSnapshotJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(SNAPSHOT_TYPE, normalized.code, normalized.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		const envelope = runIntrospect(snapshotScript(normalized.job), SNAPSHOT_TYPE, parsed)
+		// The live host has no crypto and cannot read its own PNG back, so it reports
+		// size and a scene digest only. The mock is real Node, so it also reports the
+		// content hash — the strongest form of the verification the loop needs.
+		if (envelope.ok === true && typeof envelope.file === 'string' && fs.existsSync(envelope.file)) {
+			try {
+				envelope.contentHash = createHash('sha256').update(fs.readFileSync(envelope.file)).digest('hex')
+			} catch {
+				/* leave contentHash unset; sizeBytes still stands as evidence */
+			}
+		}
+		return envelope
+	}
+
 	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
 		const code = typeof parsed.code === 'string' ? parsed.code : ''
@@ -336,13 +462,76 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				return
 			}
 			if (request.method === 'GET' && url.pathname === '/') {
-				const body = 'Stallion mock bridge — POST /post, GET /get, POST /render-frames\n'
+				const body =
+					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, ' +
+					'GET|POST /state, /layers, /frame, /snapshot\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
 			}
 			if (request.method === 'GET' && url.pathname === '/get') {
 				serveJson(response, lastPayload ?? heartbeat())
+				return
+			}
+			// Path-shaped introspection. The live bridge cannot route by URL at all —
+			// Cavalry's WebServer has no router — so these routes are a mock-only surface,
+			// and they answer with the identical envelope a `type`-shaped /post request
+			// returns. A JSON body is merged over the query string (body wins), and unlike
+			// POST /post these reply directly rather than ack-then-poll: a path-shaped
+			// request has no queue contract to honour.
+			const introspectPath =
+				url.pathname === '/state' || url.pathname === '/layers'
+					? url.pathname.slice(1)
+					: url.pathname === '/frame' || url.pathname === '/snapshot'
+						? 'snapshot'
+						: null
+			if (introspectPath && (request.method === 'GET' || request.method === 'HEAD' || request.method === 'POST')) {
+				let parsed = introspectQuery(url, introspectPath as 'state' | 'layers' | 'snapshot')
+				if (request.method === 'POST') {
+					try {
+						const raw = await readBody(request)
+						if (raw.trim()) parsed = { ...parsed, ...(JSON.parse(raw) as Record<string, unknown>) }
+					} catch (err) {
+						const message = String((err as Error)?.message ?? err)
+						if (/too large/i.test(message)) {
+							serveJson(response, errorEnvelope(introspectPath, ERROR_CODES.BAD_REQUEST, message), 413)
+							return
+						}
+					}
+				}
+				const envelope =
+					introspectPath === 'snapshot' ? handleSnapshotPost(parsed) : handleReadbackPost(introspectPath, parsed)
+				lastPayload = envelope
+				if (introspectPath === 'snapshot' && envelope.ok === true) {
+					// A snapshot exists to short-circuit disk polling, so the mock hands the
+					// pixels back rather than only naming a file. The live bridge cannot do
+					// this — its script host has no binary read — which is why the field is
+					// absent there rather than null.
+					const file = typeof envelope.file === 'string' ? envelope.file : ''
+					const sidecar = `${file}.rgba`
+					if (inlineWanted(parsed, url) && fs.existsSync(sidecar)) {
+						const comp = scene.comps.get(String(envelope.compId ?? '')) ?? scene.activeComp()
+						const pct = Number(envelope.scale)
+						if (comp && Number.isFinite(pct) && pct > 0) {
+							const width = Math.max(1, Math.round(comp.width * (pct / 100)))
+							const height = Math.max(1, Math.round(comp.height * (pct / 100)))
+							const rgba = fs.readFileSync(sidecar)
+							if (rgba.length === width * height * 4) {
+								envelope.pngBase64 = encodePng(rgba, width, height).toString('base64')
+								envelope.width = width
+								envelope.height = height
+							} else {
+								envelope.inlineNote = `sidecar length ${rgba.length} does not match ${width}x${height}x4`
+							}
+						}
+					}
+				}
+				if (request.method === 'HEAD') {
+					response.writeHead(200, { 'Content-Type': 'application/json' })
+					response.end()
+					return
+				}
+				serveJson(response, envelope)
 				return
 			}
 			if (request.method === 'POST' && (url.pathname === '/post' || url.pathname === '/render-frames')) {
@@ -392,6 +581,12 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						envelope = { ok: true }
 					} else if (parsed.type === RENDER_FRAMES_TYPE) {
 						envelope = await handleRenderFrames(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === STATE_TYPE || parsed.type === LAYERS_TYPE) {
+						envelope = handleReadbackPost(parsed.type === STATE_TYPE ? 'state' : 'layers', parsed)
+						lastPayload = envelope
+					} else if (parsed.type === SNAPSHOT_TYPE) {
+						envelope = handleSnapshotPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)

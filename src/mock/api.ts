@@ -376,12 +376,19 @@ export class MockApi {
 		return this.scene.inConnectedAttributes(String(id))
 	}
 
-	getInConnection(id: string, attr: string): string[] {
-		return this.scene.inConnection(String(id), String(attr))
+	/**
+	 * Real 2.8 signature: `getInConnection(layerId, attrId): string`, empty string when
+	 * the attribute has no input. The scene keeps the richer `${srcId}.${srcAttr}` list,
+	 * but the api boundary collapses it to one string so a script written against the
+	 * mock cannot pass a shape that Cavalry would never return.
+	 */
+	getInConnection(id: string, attr: string): string {
+		return this.scene.inConnection(String(id), String(attr))[0] ?? ''
 	}
 
-	getOutConnections(id: string, attr: string): Array<{ dstId: string; dstAttr: string }> {
-		return this.scene.outConnections(String(id), String(attr))
+	/** Real 2.8 signature: `getOutConnections(layerId, attrId): string[]`. */
+	getOutConnections(id: string, attr: string): string[] {
+		return this.scene.outConnections(String(id), String(attr)).map((c) => `${c.dstId}.${c.dstAttr}`)
 	}
 
 	getOutConnectedAttributes(id: string): string[] {

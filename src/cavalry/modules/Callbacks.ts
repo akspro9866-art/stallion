@@ -31,6 +31,19 @@
  */
 
 import { RECEIPT_RUNTIME } from './Receipt.ts'
+import {
+	ERROR_CODES,
+	LAYERS_TYPE,
+	SNAPSHOT_TYPE,
+	STATE_TYPE,
+	errorEnvelope,
+	normalizeReadbackJob,
+	normalizeSnapshotJob,
+	readbackScript,
+	snapshotScript,
+	type ReadbackJob,
+	type SnapshotJob,
+} from './Introspect.ts'
 
 export const VERSION = '0.10.0'
 
@@ -61,6 +74,18 @@ interface PostPayload {
 	resolutionScale?: unknown
 	format?: unknown
 	outDir?: unknown
+	/** state / layers / snapshot payload — see Introspect.ts */
+	frame?: unknown
+	t?: unknown
+	offset?: unknown
+	limit?: unknown
+	attrs?: unknown
+	attributes?: unknown
+	budgetMs?: unknown
+	scale?: unknown
+	fileName?: unknown
+	/** Names the `_mg.*` helper that built this payload, echoed into error envelopes. */
+	mgCall?: unknown
 }
 
 /** Run fn, returning null on any throw — bridge code must never die on reads. */
@@ -126,7 +151,15 @@ export class Callbacks {
 			scene: safe(() => api.getSceneFilePath()),
 			frame: safe(() => api.getFrame()),
 			unSaved: safe(() => api.sceneHasUnsavedChanges()),
-			capabilities: { receipt: true, renderFrames: true, mock: false },
+			capabilities: {
+				receipt: true,
+				renderFrames: true,
+				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
+				// WebServer serves exactly /get and /post. See Introspect.ts.
+				introspect: ['state', 'layers', 'snapshot'],
+				errorEnvelope: 1,
+				mock: false,
+			},
 			ts: Date.now(),
 		})
 	}
@@ -174,6 +207,18 @@ export class Callbacks {
 		// Batch frame verification: render frames in one call and serve the batch.
 		if (parsed.type === RENDER_FRAMES_TYPE) {
 			this.#handleRenderFrames(parsed)
+			return
+		}
+
+		// Readback: scene-graph state, layer hierarchy, single-frame snapshot.
+		// These ride the same /post queue as `script` because Cavalry's WebServer
+		// exposes no other path — see Introspect.ts for why.
+		if (parsed.type === STATE_TYPE || parsed.type === LAYERS_TYPE) {
+			this.#handleReadback(parsed.type === STATE_TYPE ? 'state' : 'layers', parsed)
+			return
+		}
+		if (parsed.type === SNAPSHOT_TYPE) {
+			this.#handleSnapshot(parsed)
 			return
 		}
 
@@ -433,7 +478,10 @@ export class Callbacks {
 					return result;
 				}
 				var link = __stallionReceipt.read(function () { return api.getInConnection(dstId, dstAttr); });
-				var dead = link === null || link === undefined || (Array.isArray(link) && link.length === 0);
+				// 2.8 returns a string, and an attribute with no input is "" rather than
+				// null — an empty string read back after connect() is a dead connection.
+				// The array branch stays for hosts that answer with a list.
+				var dead = link === null || link === undefined || link === '' || (Array.isArray(link) && link.length === 0);
 				if (dead) __diag.failedConnections.push(String(srcId) + ':' + String(srcAttr) + '->' + String(dstId) + ':' + String(dstAttr));
 				return result;
 			};
@@ -551,6 +599,65 @@ __deliver(__json);
 	 * callers read the files over localhost; the mock bridge serves both
 	 * formats as real inline buffers.
 	 */
+	/**
+	 * Structured readback of the active composition: layer hierarchy, deterministic
+	 * semantic IDs, world-space bounding boxes and attribute values evaluated at the
+	 * requested frame. `state` and `layers` share the runtime and differ only in the
+	 * `kind` they report, so a caller can ask for the cheap thing (the list) without
+	 * paying for the expensive thing (every attribute).
+	 *
+	 * Executed through `#wrapped` with the atomic marker: the result is delivered by
+	 * both channels (globalThis stash and loopback POST) exactly like a script, and no
+	 * undo group is opened, because reading must not create an undo step.
+	 */
+	#handleReadback = (kind: 'state' | 'layers', parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const job: ReadbackJob = normalizeReadbackJob(kind, parsed as Record<string, unknown>)
+		const success = api.exec(SCRIPT_ID, this.#wrapped(readbackScript(job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(kind, ERROR_CODES.EXEC_FAILED, `${kind} readback failed to execute in the Cavalry script host.`, { seq, mgCall }))
+			console.error(`Stallion: ${kind} readback failed to execute`)
+			return
+		}
+	}
+
+	/**
+	 * Single-frame snapshot loopback: render one frame to disk and report the path,
+	 * the wall-clock it finished, the byte size read back in the same call, and a
+	 * digest of the scene as it was at that frame. This is what removes blind disk
+	 * polling from the render-verify-refine loop.
+	 *
+	 * Cavalry's script host cannot return the PNG bytes, so `file` is the verification
+	 * target and the caller reads it over localhost. The mock bridge, which is real
+	 * Node, additionally serves an inline base64 buffer.
+	 */
+	#handleSnapshot = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const normalized = normalizeSnapshotJob(parsed as Record<string, unknown>)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(SNAPSHOT_TYPE, normalized.code, normalized.error, { seq, mgCall }))
+			console.error(`Stallion: snapshot rejected — ${normalized.error}`)
+			return
+		}
+		const job: SnapshotJob = normalized.job
+		const success = api.exec(SCRIPT_ID, this.#wrapped(snapshotScript(job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: SNAPSHOT_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(SNAPSHOT_TYPE, ERROR_CODES.EXEC_FAILED, 'Snapshot script failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: snapshot script failed to execute')
+			return
+		}
+	}
+
 	#handleRenderFrames = (parsed: PostPayload): void => {
 		const seq = parsed.seq
 		const rawFrames = Array.isArray(parsed.frames) ? (parsed.frames as unknown[]) : []

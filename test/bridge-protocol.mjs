@@ -19,8 +19,14 @@ import path from 'node:path'
 import vm from 'node:vm'
 import os from 'node:os'
 import assert from 'node:assert/strict'
+import { fileURLToPath } from 'node:url'
+import { removeTreeSync } from './fs-safe.mjs'
 
-const dist = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), '../dist/Stallion.js')
+// fileURLToPath handles the `C:/` vs `/` split for us; hand-rolled regexes
+// against the drive letter are exactly the platform-specific path arithmetic
+// this suite has to stay free of.
+const here = path.dirname(fileURLToPath(import.meta.url))
+const dist = path.resolve(here, '../dist/Stallion.js')
 const code = fs.readFileSync(dist, 'utf8')
 
 function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {
@@ -194,7 +200,7 @@ const served = (m) => JSON.parse(m.state.served)
   m.tick()
   const r = served(m)
   assert.equal(r.result, 1)
-  fs.rmSync(dir, { recursive: true, force: true })
+  removeTreeSync(dir)
   console.log('✔ stallion.json overrides port and enables token auth')
 }
 

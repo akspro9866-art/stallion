@@ -1,7 +1,7 @@
 // VERSION 0.10.0
 // This is the compiled version
 // Read the source at https://github.com/akspro9866-art/stallion.git
-(()=>{var A=`
+(()=>{var C=`
 var __stallionReceipt = (function () {
 	var MAX_CONSOLE_ENTRIES = 64;
 	var MAX_CONSOLE_TEXT = 240;
@@ -96,7 +96,245 @@ var __stallionReceipt = (function () {
 	}
 	return { read: read, facts: facts, hash: hash, beatBoxes: beatBoxes, consoleLines: consoleLines };
 })();
-`.trim();var k="0.10.0",F="io.scenery.stallion",b="__stallion_result__",S="__stallionResult__",R="render-frames";function a(h){try{return h()}catch{return null}}var p=class{#t;#r;constructor(e,t){this.#t=e,this.#r=t}static loadConfig(){let e={host:"127.0.0.1",port:8080,token:""},t=a(()=>api.getAppDataFolder());if(!t||typeof t!="string")return e;let n=t.replace(/[\\/]$/,"")+"/stallion.json";if(a(()=>api.filePathExists(n))!==!0)return e;let r=a(()=>JSON.parse(api.readFromFile(n)));return!r||typeof r!="object"?e:{host:typeof r.host=="string"&&r.host?r.host:e.host,port:typeof r.port=="number"&&Number.isFinite(r.port)&&r.port>0&&r.port<65536?Math.floor(r.port):e.port,token:typeof r.token=="string"?r.token:e.token}}#e=e=>{a(()=>{this.#t.setResultForGet(typeof e=="string"?e:JSON.stringify(e))})};serveStatus=()=>{this.#e({kind:"status",stallion:k,cavalry:a(()=>api.getCavalryVersion()),scene:a(()=>api.getSceneFilePath()),frame:a(()=>api.getFrame()),unSaved:a(()=>api.sceneHasUnsavedChanges()),capabilities:{receipt:!0,renderFrames:!0,mock:!1},ts:Date.now()})};#i=e=>{let t=a(()=>globalThis[S]);if(typeof t!="string")return;let n=a(()=>JSON.parse(t));n&&n.seq===e&&this.#e(t)};onPost=()=>{this.#n(a(()=>this.#t.getNextPost()));let e=64;for(;e-- >0;){let t=a(()=>this.#t.postCount());if(typeof t!="number"||!Number.isFinite(t)||t<1)break;this.#n(a(()=>this.#t.getNextPost()))}};#n=e=>{if(!e||typeof e.result!="string"){console.error("Stallion: No post data");return}let t=a(()=>JSON.parse(e.result));if(!t||typeof t!="object"){console.error("Stallion: Failed to parse request as JSON");return}if(console.log("Stallion: Data received"),t.type===b){this.#e(e.result);return}if(t.type===R){this.#s(t);return}let{type:n,code:r,path:o,seq:s,statePath:f}=t;if(!n&&!o){console.error("Stallion: Missing/empty `type` key in request");return}if(!r&&!o){console.error("Stallion: Missing/empty `code` or `path` key in request");return}if(n==="script"||o){if(r&&o&&console.warn("Stallion: `code` and `path` keys are both in the request, executing `path`"),o){if(!api.filePathExists(o)){this.#e({kind:"result",seq:s,ok:!1,error:`No script found at ${o}`}),console.error(`Stallion: No script found at ${o}`);return}if(ui.runFileScript(o)){this.#e({kind:"result",seq:s,ok:!0,note:"file script executed (no captured result)"}),console.log("Stallion: Script successfully executed");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}if(r){let _=api.exec(F,this.#a(r,s,f,{beatFrames:t.beatFrames,diagnostics:t.diagnostics===!0}));if(this.#i(s),_){console.log("Stallion: Script successfully executed");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}if(typeof n=="string"&&(n.startsWith("javaScript")||n.startsWith("sksl"))){let _=api.getSelection();_.length||(_=[api.create(n)]);let l="expression";n==="javaScriptShape"&&(l="generator.expression"),n.startsWith("sksl")&&(l="code");let u=[],i=[];for(let c of _){if(api.getLayerType(c)!==n){let g=api.getNiceName(c);i.push(String(g)),console.warn(`Stallion: Skipped layer '${g}' because it is not of type '${n}'`);continue}api.set(c,{[l]:r}),u.push(String(c))}this.#e({kind:"result",seq:s,ok:!0,applied:u,skipped:i}),console.log("Stallion: Successfully applied expression");return}if(typeof n=="string"&&n.toLowerCase().includes("render")){let _=api.getRenderQueueItems(),l=[];for(let u of _)api.get(u,"selected")&&(api.set(u,{[n]:r}),l.push(String(u)));this.#e({kind:"result",seq:s,ok:!0,applied:l}),console.log("Stallion: Successfully applied render expression");return}this.#e({kind:"result",seq:s,ok:!1,error:`Unexpected type '${n}'`}),console.error(`Stallion: Unexpected type '${n}'`)};#a=(e,t,n,r)=>{let o=`http://${this.#r.host}:${this.#r.port}`,s=this.#r.token,f=JSON.stringify(t)??"undefined",_=JSON.stringify(n??""),l=e.startsWith("/* cavalry-mcp:atomic */"),u=l?e:`(() => {
+`.trim();var w="state",R="layers",h="snapshot";var $=["position.x","position.y","scale.x","scale.y","rotation","opacity"],y={BAD_REQUEST:"STALLION_BAD_REQUEST",MISSING_SEQ:"STALLION_MISSING_SEQ",EXEC_FAILED:"STALLION_EXEC_FAILED",NO_COMP:"STALLION_NO_ACTIVE_COMP",NO_FRAME:"STALLION_NO_FRAME",BAD_LAYER:"STALLION_UNKNOWN_LAYER",RENDER_FAILED:"STALLION_RENDER_FAILED",UNAUTHORISED:"STALLION_UNAUTHORISED"};function S(a,e,t,r={}){let n={ok:!1,kind:a,error:t,code:e};return r.seq!==void 0&&(n.seq=r.seq),r.mgCall&&(n.mgCall=r.mgCall),r.layerId&&(n.layerId=r.layerId),r.attrPath&&(n.attrPath=r.attrPath),r.stack&&(n.stack=String(r.stack).slice(0,2e3)),n}function m(a,e,t,r){let n=Number(a);return Number.isFinite(n)?Math.min(r,Math.max(t,Math.round(n))):e}function T(a,e){let r=(Array.isArray(e.attrs)?e.attrs:[]).map(n=>typeof n=="string"?n.trim():"").filter(Boolean).slice(0,40);return{kind:a,seq:e.seq,compId:typeof e.compId=="string"?e.compId.trim():"",frame:Number.isFinite(Number(e.frame))?m(e.frame,0,-1e9,1e9):null,restoreFrame:null,offset:m(e.offset,0,0,1e9),limit:m(e.limit,200,1,1e3),attrs:r.length?r:[...$],includeAttributes:e.attributes===!0,budgetMs:m(e.budgetMs,120,5,5e3)}}function O(a){let e=Number(a.frame??a.t);if(!Number.isFinite(e))return{error:"snapshot requires a numeric `frame` (or `t`).",code:y.NO_FRAME};let t=Number(a.scale??a.resolutionScale),r=typeof a.fileName=="string"&&a.fileName.trim()?a.fileName.trim().replace(/[\\/:*?"<>|]/g,"_").slice(0,80):`snapshot-${String(Math.round(e)).padStart(6,"0")}`;return{job:{seq:a.seq,compId:typeof a.compId=="string"?a.compId.trim():"",frame:m(e,0,-1e9,1e9),restoreFrame:null,scale:Number.isFinite(t)&&t>0?m(t,100,1,400):100,outDir:typeof a.outDir=="string"?a.outDir.trim().replace(/\\/g,"/"):"",fileName:r}}}function L(a){return`/* cavalry-mcp:atomic */ (function () {
+var __rb = ${JSON.stringify(a)};
+var __read = function (fn) { try { return fn(); } catch (e) { return null; }; };
+var __num = function (v, fallback) { var n = Number(v); return isFinite(n) ? n : fallback; };
+// getBoundingBox(id, true) is documented as {x, y, width, height, centre, left, right,
+// top}. Reading width/height rather than w/h is what the shipped receipt code already
+// does against a live 2.8 host; the array and w/h fallbacks stay so one odd layer type
+// cannot blank out a box.
+var __box = function (bb) {
+	if (!bb || typeof bb !== 'object') return null;
+	var arr = Array.isArray(bb);
+	var w = arr ? bb[2] : (bb.width === undefined ? bb.w : bb.width);
+	var h = arr ? bb[3] : (bb.height === undefined ? bb.h : bb.height);
+	return { x: __num(arr ? bb[0] : bb.x, 0), y: __num(arr ? bb[1] : bb.y, 0), width: __num(w, 0), height: __num(h, 0) };
+};
+var __started = Date.now();
+var __prevComp = __read(function () { return api.getActiveComp(); });
+var __compId = __rb.compId || __prevComp;
+var __prevFrame = __num(__read(function () { return api.getFrame(); }), 0);
+if (__rb.compId && __rb.compId !== __prevComp) { __read(function () { api.setActiveComp(__rb.compId); }); }
+// An empty scene and a scene with no comp open are different states, and collapsing
+// them into total:0 forces the caller to guess. Say which one it is.
+if (!__compId) {
+	return { ok: false, kind: __rb.kind, seq: __rb.seq, error: 'No active comp to read back.', code: 'STALLION_NO_ACTIVE_COMP' };
+}
+
+var __slug = function (text) {
+	return String(text == null ? '' : text)
+		.replace(/[^A-Za-z0-9]+/g, '_')
+		.replace(/^_+|_+$/g, '')
+		.toLowerCase()
+		.slice(0, 48);
+};
+
+var __ids = __read(function () { return api.getCompLayers(false); }) || [];
+var __top = __read(function () { return api.getCompLayers(true); }) || [];
+var __topSet = {};
+for (var t = 0; t < __top.length; t++) __topSet[__top[t]] = true;
+
+// Depth from the comp root, so a hierarchy can be rebuilt without a second pass.
+var __depth = {};
+var depthOf = function (id) {
+	if (__depth[id] !== undefined) return __depth[id];
+	var guard = 0, d = 0, cur = id;
+	while (guard++ < 32) {
+		var p = __read(function () { return api.getParent(cur); });
+		if (!p || p === cur) break;
+		cur = p; d++;
+	}
+	__depth[id] = d;
+	return d;
+};
+
+// Step the playhead once, then read every layer at that instant. Values are the
+// evaluated ones \u2014 a connected or animated attribute reports what is on screen at
+// __rb.frame, not its static default.
+var __frame = __rb.frame === null ? __prevFrame : __rb.frame;
+if (__frame !== __prevFrame) __read(function () { api.setFrame(__frame); });
+
+var __names = {};
+var __total = __ids.length;
+var __out = [];
+var __truncated = false;
+var __nextOffset = -1;
+var __index = {};
+for (var i = 0; i < __total; i++) __index[__ids[i]] = i;
+
+for (var k = __rb.offset; k < __total; k++) {
+	if (Date.now() - __started > __rb.budgetMs) { __truncated = true; __nextOffset = k; break; }
+	if (__out.length >= __rb.limit) { __truncated = true; __nextOffset = k; break; }
+	var id = __ids[k];
+	var type = __read(function () { return api.getLayerType(id); });
+	var name = __read(function () { return api.getNiceName(id); });
+	__names[id] = name;
+	var parent = __read(function () { return api.getParent(id); });
+	if (parent && __names[parent] === undefined) {
+		__names[parent] = __read(function () { return api.getNiceName(parent); });
+	}
+	var chain = [];
+	var cur = id, guard = 0;
+	while (guard++ < 16 && cur) { chain.unshift(__slug(__names[cur] || cur) + '#' + (__index[cur] === undefined ? '?' : __index[cur])); var up = __read(function () { return api.getParent(cur); }); if (!up || up === cur) break; cur = up; }
+	// semanticId is index-qualified so it is unique and reproducible from the scene
+	// alone. Dropping the suffix would collide as soon as two layers share a label, and
+	// resolving collisions by scanning every preceding layer is O(n^2) across the comp \u2014
+	// on Cavalry's single thread that is precisely the freeze the budget exists to
+	// prevent. semanticSlug carries the bare name for callers that want to group.
+	var base = __slug(name || type);
+	var semantic = (base || 'layer') + '_' + k;
+
+	var entry = {
+		id: id,
+		ref: type + '#' + k,
+		semanticId: semantic,
+		semanticSlug: base,
+		type: type,
+		name: name,
+		path: chain,
+		depth: depthOf(id),
+		topLevel: __topSet[id] === true,
+		inFrame: __read(function () { return api.getInFrame(id); }),
+		outFrame: __read(function () { return api.getOutFrame(id); }),
+		boundingBox: null,
+		pivot: null,
+		attrs: {},
+		connected: [],
+		unreadable: []
+	};
+	var bb = __box(__read(function () { return api.getBoundingBox(id, true); }));
+	if (bb) entry.boundingBox = bb;
+	var pv = __read(function () { return api.getPivotPosition(id); });
+	if (pv) entry.pivot = { x: __num(Array.isArray(pv) ? pv[0] : pv.x, 0), y: __num(Array.isArray(pv) ? pv[1] : pv.y, 0) };
+
+	var want = __rb.attrs;
+	if (__rb.includeAttributes) {
+		var declared = __read(function () { return api.getAttributes(id); });
+		if (Array.isArray(declared) && declared.length) {
+			want = declared.slice(0, 40);
+			entry.attributeNames = declared;
+		}
+	}
+	for (var a = 0; a < want.length; a++) {
+		var path = want[a];
+		var value = __read(function () { return api.get(id, path); });
+		// Driven? An attribute fed by a behaviour node or another layer reports the
+		// upstream ref here, so a caller can tell a procedural rig from a baked value
+		// without a second round trip. This is what refclone keys its tier decisions on.
+		var drivenBy = __read(function () { return api.getInConnection(id, path); });
+		if (drivenBy) entry.connected.push({ attrPath: path, from: String(drivenBy) });
+		if (value === null || value === undefined) { entry.unreadable.push(path); continue; }
+		if (Array.isArray(value)) entry.attrs[path] = value.map(function (v) { return __num(v, v); });
+		else if (typeof value === 'object') entry.attrs[path] = { x: __num(value.x, value.x), y: __num(value.y, value.y) };
+		else entry.attrs[path] = typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string' ? value : String(value);
+	}
+	var outs = [];
+	for (var o = 0; o < want.length && outs.length < 16; o++) {
+		var list = __read(function () { return api.getOutConnections(id, want[o]); });
+		if (Array.isArray(list) && list.length) outs.push({ attrPath: want[o], to: list.map(String) });
+	}
+	if (outs.length) entry.outConnections = outs;
+	__out.push(entry);
+}
+
+if (__rb.frame !== null && __frame !== __prevFrame) { __read(function () { api.setFrame(__prevFrame); }); }
+if (__rb.compId && __prevComp && __rb.compId !== __prevComp) { __read(function () { api.setActiveComp(__prevComp); }); }
+
+return {
+	ok: true,
+	kind: __rb.kind,
+	seq: __rb.seq,
+	compId: __compId,
+	frame: __frame,
+	total: __total,
+	offset: __rb.offset,
+	returned: __out.length,
+	truncated: __truncated,
+	nextOffset: __nextOffset,
+	elapsedMs: Date.now() - __started,
+	layers: __out
+};
+})()`}function D(a){return`/* cavalry-mcp:atomic */ (function () {
+var __sn = ${JSON.stringify(a)};
+var __read = function (fn) { try { return fn(); } catch (e) { return null; }; };
+var __num = function (v, fallback) { var n = Number(v); return isFinite(n) ? n : fallback; };
+var __box = function (bb) {
+	if (!bb || typeof bb !== 'object') return null;
+	var arr = Array.isArray(bb);
+	var w = arr ? bb[2] : (bb.width === undefined ? bb.w : bb.width);
+	var h = arr ? bb[3] : (bb.height === undefined ? bb.h : bb.height);
+	return { x: __num(arr ? bb[0] : bb.x, 0), y: __num(arr ? bb[1] : bb.y, 0), width: __num(w, 0), height: __num(h, 0) };
+};
+var __prevComp = __read(function () { return api.getActiveComp(); });
+var __prevFrame = __num(__read(function () { return api.getFrame(); }), 0);
+if (__sn.compId && __sn.compId !== __prevComp) { __read(function () { api.setActiveComp(__sn.compId); }); }
+var __dir = __sn.outDir || (api.getHomeFolder() + '/.stallion/snapshots');
+var __target = __dir + '/' + __sn.fileName;
+var __ok = true, __error = null, __code = null;
+if (!(__sn.compId || __prevComp)) { __ok = false; __error = 'No active comp to render.'; __code = 'STALLION_NO_ACTIVE_COMP'; }
+try { if (__ok && __sn.frame !== __prevFrame) api.setFrame(__sn.frame); } catch (e) { __ok = false; __error = String(e && e.message ? e.message : e); __code = 'STALLION_RENDER_FAILED'; }
+if (__ok) {
+	try { api.renderPNGFrame(__target, __sn.scale); } catch (e2) { __ok = false; __error = String(e2 && e2.message ? e2.message : e2); __code = 'STALLION_RENDER_FAILED'; }
+}
+var __renderedAt = Date.now();
+// Verify the artifact in the same call that produced it: size and existence read back
+// straight after renderPNGFrame returns. Without this a caller has to poll the disk to
+// learn whether the frame is real, and cannot tell this render from a stale file.
+var __bytes = __ok ? __read(function () { return api.getFileSize(__target + '.png'); }) : null;
+var __exists = __bytes === null ? __read(function () { return api.filePathExists(__target + '.png'); }) : __bytes > 0;
+if (__ok && __bytes !== null && !(__bytes > 0)) { __ok = false; __error = 'renderPNGFrame produced a zero-byte file at ' + __target + '.png'; __code = 'STALLION_RENDER_FAILED'; }
+// Deterministic frame digest. Cavalry's script host has no crypto module and cannot
+// read the PNG it just wrote back as bytes, so hashing the *file* is not available
+// here; what is available \u2014 and what actually answers "which frame is this" \u2014 is a
+// digest of the evaluated scene at that frame. Two renders of the same comp at the
+// same frame produce the same value, and any change to geometry on that frame changes
+// it. Callers that need a content hash of the bytes compute it after reading the file
+// over localhost, and the mock bridge fills contentHash in directly.
+// Bounded to 64 layers: this is a fingerprint, not a full walk, and it must not eat
+// the slice's whole budget.
+var __dig = function (str) {
+	var hi = 0x811c9dc5, lo = 0x1b873593;
+	for (var p = 0; p < str.length; p++) {
+		hi ^= str.charCodeAt(p); hi = Math.imul(hi, 0x01000193) >>> 0;
+		lo ^= str.charCodeAt(str.length - 1 - p); lo = Math.imul(lo, 0x01000193) >>> 0;
+	}
+	return ('00000000' + hi.toString(16)).slice(-8) + ('00000000' + lo.toString(16)).slice(-8);
+};
+var __frameHash = null;
+if (__ok) {
+	var __sigIds = (__read(function () { return api.getCompLayers(true); }) || []).slice(0, 64);
+	var __sig = '';
+	for (var q = 0; q < __sigIds.length; q++) {
+		var __sid = __sigIds[q];
+		var __sbb = __box(__read(function () { return api.getBoundingBox(__sid, true); }));
+		__sig += __sid + '|';
+		if (__sbb) __sig += [__sbb.x, __sbb.y, __sbb.width, __sbb.height].join(',');
+		__sig += ';';
+	}
+	__frameHash = __dig(String(__sn.frame) + '#' + String(__sn.compId || __prevComp) + '#' + __sig);
+}
+if (__sn.frame !== __prevFrame) { __read(function () { api.setFrame(__prevFrame); }); }
+if (__sn.compId && __prevComp && __sn.compId !== __prevComp) { __read(function () { api.setActiveComp(__prevComp); }); }
+return {
+	ok: __ok,
+	kind: 'snapshot',
+	seq: __sn.seq,
+	compId: String(__sn.compId || __prevComp),
+	frame: __sn.frame,
+	file: __target + '.png',
+	fileName: __sn.fileName,
+	scale: __sn.scale,
+	renderedAt: __renderedAt,
+	renderedAtIso: new Date(__renderedAt).toISOString(),
+	restoredFrame: __prevFrame,
+	exists: __exists === true,
+	sizeBytes: __bytes === null ? null : Number(__bytes),
+	frameHash: __frameHash,
+	error: __error,
+	code: __code
+};
+})()`}var E="0.10.0",k="io.scenery.stallion",I="__stallion_result__",N="__stallionResult__",J="render-frames";function u(a){try{return a()}catch{return null}}var g=class{#t;#r;constructor(e,t){this.#t=e,this.#r=t}static loadConfig(){let e={host:"127.0.0.1",port:8080,token:""},t=u(()=>api.getAppDataFolder());if(!t||typeof t!="string")return e;let r=t.replace(/[\\/]$/,"")+"/stallion.json";if(u(()=>api.filePathExists(r))!==!0)return e;let n=u(()=>JSON.parse(api.readFromFile(r)));return!n||typeof n!="object"?e:{host:typeof n.host=="string"&&n.host?n.host:e.host,port:typeof n.port=="number"&&Number.isFinite(n.port)&&n.port>0&&n.port<65536?Math.floor(n.port):e.port,token:typeof n.token=="string"?n.token:e.token}}#e=e=>{u(()=>{this.#t.setResultForGet(typeof e=="string"?e:JSON.stringify(e))})};serveStatus=()=>{this.#e({kind:"status",stallion:E,cavalry:u(()=>api.getCavalryVersion()),scene:u(()=>api.getSceneFilePath()),frame:u(()=>api.getFrame()),unSaved:u(()=>api.sceneHasUnsavedChanges()),capabilities:{receipt:!0,renderFrames:!0,introspect:["state","layers","snapshot"],errorEnvelope:1,mock:!1},ts:Date.now()})};#o=e=>{let t=u(()=>globalThis[N]);if(typeof t!="string")return;let r=u(()=>JSON.parse(t));r&&r.seq===e&&this.#e(t)};onPost=()=>{this.#i(u(()=>this.#t.getNextPost()));let e=64;for(;e-- >0;){let t=u(()=>this.#t.postCount());if(typeof t!="number"||!Number.isFinite(t)||t<1)break;this.#i(u(()=>this.#t.getNextPost()))}};#i=e=>{if(!e||typeof e.result!="string"){console.error("Stallion: No post data");return}let t=u(()=>JSON.parse(e.result));if(!t||typeof t!="object"){console.error("Stallion: Failed to parse request as JSON");return}if(console.log("Stallion: Data received"),t.type===I){this.#e(e.result);return}if(t.type===J){this.#l(t);return}if(t.type===w||t.type===R){this.#s(t.type===w?"state":"layers",t);return}if(t.type===h){this.#_(t);return}let{type:r,code:n,path:o,seq:s,statePath:i}=t;if(!r&&!o){console.error("Stallion: Missing/empty `type` key in request");return}if(!n&&!o){console.error("Stallion: Missing/empty `code` or `path` key in request");return}if(r==="script"||o){if(n&&o&&console.warn("Stallion: `code` and `path` keys are both in the request, executing `path`"),o){if(!api.filePathExists(o)){this.#e({kind:"result",seq:s,ok:!1,error:`No script found at ${o}`}),console.error(`Stallion: No script found at ${o}`);return}if(ui.runFileScript(o)){this.#e({kind:"result",seq:s,ok:!0,note:"file script executed (no captured result)"}),console.log("Stallion: Script successfully executed");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}if(n){let _=api.exec(k,this.#n(n,s,i,{beatFrames:t.beatFrames,diagnostics:t.diagnostics===!0}));if(this.#o(s),_){console.log("Stallion: Script successfully executed");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}this.#e({kind:"result",seq:s,ok:!1,error:"Script failed to execute"}),console.error("Stallion: Script failed to execute");return}if(typeof r=="string"&&(r.startsWith("javaScript")||r.startsWith("sksl"))){let _=api.getSelection();_.length||(_=[api.create(r)]);let c="expression";r==="javaScriptShape"&&(c="generator.expression"),r.startsWith("sksl")&&(c="code");let d=[],l=[];for(let f of _){if(api.getLayerType(f)!==r){let v=api.getNiceName(f);l.push(String(v)),console.warn(`Stallion: Skipped layer '${v}' because it is not of type '${r}'`);continue}api.set(f,{[c]:n}),d.push(String(f))}this.#e({kind:"result",seq:s,ok:!0,applied:d,skipped:l}),console.log("Stallion: Successfully applied expression");return}if(typeof r=="string"&&r.toLowerCase().includes("render")){let _=api.getRenderQueueItems(),c=[];for(let d of _)api.get(d,"selected")&&(api.set(d,{[r]:n}),c.push(String(d)));this.#e({kind:"result",seq:s,ok:!0,applied:c}),console.log("Stallion: Successfully applied render expression");return}this.#e({kind:"result",seq:s,ok:!1,error:`Unexpected type '${r}'`}),console.error(`Stallion: Unexpected type '${r}'`)};#n=(e,t,r,n)=>{let o=`http://${this.#r.host}:${this.#r.port}`,s=this.#r.token,i=JSON.stringify(t)??"undefined",_=JSON.stringify(r??""),c=e.startsWith("/* cavalry-mcp:atomic */"),d=c?e:`(() => {
 	var __undo = typeof api.startUndoGroup === 'function';
 	if (__undo) api.startUndoGroup('AI Motion Batch');
 	try {
@@ -105,13 +343,13 @@ var __stallionReceipt = (function () {
 	} finally {
 		if (__undo) api.endUndoGroup();
 	}
-})()`,i=l?"":`var __telemetry = (function () {
+})()`,l=c?"":`var __telemetry = (function () {
 	var __read = function (fn) { try { return fn(); } catch (e) { return null; } };
 	var __top = function () { var ids = __read(function () { return api.getCompLayers(true); }); return Array.isArray(ids) ? ids : []; };
 	var __before = __top();
 	var __started = Date.now();
 	var __snapshot = {
-		seq: ${f}, status: 'ok', errorStack: null, createdLayerIds: [],
+		seq: ${i}, status: 'ok', errorStack: null, createdLayerIds: [],
 		activeSelection: [], compInfo: null, boundingBoxes: {}, modifiedLayerIds: []
 	};
 	var __compInfo = function () {
@@ -164,19 +402,19 @@ var __stallionReceipt = (function () {
 			try {
 				api.writeToFile(__statePath, JSON.stringify(__snapshot), true);
 			} catch (writeErr) {
-				try { api.writeToFile(__statePath, JSON.stringify({ seq: ${f}, status: __snapshot.status, errorStack: __snapshot.errorStack, writeFailed: String(writeErr) }), true); } catch (e) {}
+				try { api.writeToFile(__statePath, JSON.stringify({ seq: ${i}, status: __snapshot.status, errorStack: __snapshot.errorStack, writeFailed: String(writeErr) }), true); } catch (e) {}
 			}
 			try { globalThis.__stallionState = __snapshot; } catch (e) {}
 		} catch (e) {}
 	};
 	return { snapshot: __snapshot, finalize: __finalize };
-})()`,c=l?`try {
+})()`,f=c?`try {
 	var __shared = globalThis.__stallionState;
-	if (__shared && __shared.seq === ${f}) __state = __shared;
+	if (__shared && __shared.seq === ${i}) __state = __shared;
 } catch (e) {}`:`if (__telemetry && __telemetry.finalize) {
 	__telemetry.finalize();
 	__state = __telemetry.snapshot;
-}`,x=Array.isArray(r?.beatFrames)?r.beatFrames.map(v=>Math.round(Number(v))).filter(v=>Number.isFinite(v)).slice(0,32):[],g=r?.diagnostics===!0?`(function () {
+}`,F=Array.isArray(n?.beatFrames)?n.beatFrames.map(x=>Math.round(Number(x))).filter(x=>Number.isFinite(x)).slice(0,32):[],v=n?.diagnostics===!0?`(function () {
 	if (typeof api === 'undefined' || !__stallionReceipt) return;
 	var origSet = api.set;
 	if (typeof origSet === 'function') {
@@ -208,7 +446,10 @@ var __stallionReceipt = (function () {
 					return result;
 				}
 				var link = __stallionReceipt.read(function () { return api.getInConnection(dstId, dstAttr); });
-				var dead = link === null || link === undefined || (Array.isArray(link) && link.length === 0);
+				// 2.8 returns a string, and an attribute with no input is "" rather than
+				// null \u2014 an empty string read back after connect() is a dead connection.
+				// The array branch stays for hosts that answer with a list.
+				var dead = link === null || link === undefined || link === '' || (Array.isArray(link) && link.length === 0);
 				if (dead) __diag.failedConnections.push(String(srcId) + ':' + String(srcAttr) + '->' + String(dstId) + ':' + String(dstAttr));
 				return result;
 			};
@@ -216,7 +457,7 @@ var __stallionReceipt = (function () {
 	}
 })();`:"";return`(function () {
 var __deliver = function (payload) {
-	try { globalThis.${S} = payload; } catch (e) {}
+	try { globalThis.${N} = payload; } catch (e) {}
 	try {
 		var __client = new api.WebClient(${JSON.stringify(o)});
 		${s?`__client.setTokenAuthentication(${JSON.stringify(s)});`:""}
@@ -227,9 +468,9 @@ var __statePath = ${_};
 if (!__statePath) {
 	try { __statePath = api.getHomeFolder() + '/.cavalry-mcp/last-execution-state.json'; } catch (e) {}
 }
-${A}
+${C}
 var __state = null;
-${i}
+${l}
 if (typeof __telemetry !== 'undefined' && __telemetry && __telemetry.snapshot) __state = __telemetry.snapshot;
 var __consoleLog = [];
 var __consoleRestore = (function () {
@@ -258,11 +499,11 @@ var __consoleRestore = (function () {
 	};
 })();
 var __diag = { invalidAttrs: [], failedConnections: [] };
-${g}
-var __out = { type: ${JSON.stringify(b)}, kind: 'result', seq: ${f}, ok: true };
+${v}
+var __out = { type: ${JSON.stringify(I)}, kind: 'result', seq: ${i}, ok: true };
 try {
 	var __result;
-	var __returned = ${u};
+	var __returned = ${d};
 	if (typeof __result === 'undefined') __result = __returned;
 	if (typeof __result !== 'undefined') __out.result = __result;
 } catch (err) {
@@ -273,7 +514,7 @@ try {
 } finally {
 	try { __consoleRestore(); } catch (e) {}
 }
-${c}
+${f}
 if (__state) {
 	if (__out.ok === false && __state.status !== 'error') { __state.status = 'error'; __state.errorStack = __out.stack || __out.error || null; }
 	__out.state = __state;
@@ -282,7 +523,7 @@ try {
 	var __receiptIds = [];
 	if (__state && Array.isArray(__state.createdLayerIds)) __receiptIds = __receiptIds.concat(__state.createdLayerIds);
 	if (__state && Array.isArray(__state.activeSelection)) __receiptIds = __receiptIds.concat(__state.activeSelection);
-	var __beatFrames = ${JSON.stringify(x)};
+	var __beatFrames = ${JSON.stringify(F)};
 	__out.receipt = {
 		sceneStateHash: __stallionReceipt.hash(__stallionReceipt.facts()),
 		consoleDiagnostics: __stallionReceipt.consoleLines(__consoleLog),
@@ -295,10 +536,10 @@ try {
 }
 var __json;
 try { __json = JSON.stringify(__out); } catch (e2) {
-	__json = JSON.stringify({ type: ${JSON.stringify(b)}, kind: 'result', seq: ${f}, ok: false, error: 'Script result was not serialisable' });
+	__json = JSON.stringify({ type: ${JSON.stringify(I)}, kind: 'result', seq: ${i}, ok: false, error: 'Script result was not serialisable' });
 }
 __deliver(__json);
-})()`};#o=(e,t)=>{let n=a(()=>globalThis[S]);if(typeof n!="string")return;let r=a(()=>JSON.parse(n));!r||r.seq!==e||this.#e(JSON.stringify(t(r)))};#s=e=>{let t=e.seq,r=(Array.isArray(e.frames)?e.frames:[]).map(i=>Math.round(Number(i))).filter(i=>Number.isFinite(i)&&Math.abs(i)<1e9);if(!r.length){this.#e({kind:"render-frames",seq:t,ok:!1,error:"render-frames requires a non-empty frames array"});return}if(r.length>2e3){this.#e({kind:"render-frames",seq:t,ok:!1,error:"render-frames accepts at most 2000 frames per batch"});return}let o=Number(e.resolutionScale),s=Number.isFinite(o)&&o>0?Math.min(4,Math.max(.01,o)):.5,f=e.format==="raw_rgba"?"raw_rgba":"png_buffer",_=typeof e.compId=="string"&&e.compId.trim()?e.compId.trim():"",l=typeof e.outDir=="string"&&e.outDir.trim()?e.outDir.trim():"",u=api.exec(F,C({frames:r,scale:s,format:f,compId:_,outDir:l,seq:t}));if(this.#o(t,i=>{let c=typeof i.result=="object"&&i.result!==null?i.result:{};return{...c,type:i.type,seq:i.seq,kind:"render-frames",ok:i.ok===!0&&c.ok!==!1}}),!u){this.#e({kind:"render-frames",seq:t,ok:!1,error:"Script failed to execute"}),console.error("Stallion: render-frames script failed to execute");return}console.log("Stallion: render-frames batch executed")}};function C(h){return`var __rf = ${JSON.stringify(h)};
+})()`};#a=(e,t)=>{let r=u(()=>globalThis[N]);if(typeof r!="string")return;let n=u(()=>JSON.parse(r));!n||n.seq!==e||this.#e(JSON.stringify(t(n)))};#s=(e,t)=>{let r=t.seq,n=typeof t.mgCall=="string"?t.mgCall:void 0,o=T(e,t),s=api.exec(k,this.#n(L(o),r));if(this.#a(r,i=>{let _=typeof i.result=="object"&&i.result!==null?i.result:{};return{..._,seq:i.seq,kind:e,ok:i.ok===!0&&_.ok!==!1}}),!s){this.#e(S(e,y.EXEC_FAILED,`${e} readback failed to execute in the Cavalry script host.`,{seq:r,mgCall:n})),console.error(`Stallion: ${e} readback failed to execute`);return}};#_=e=>{let t=e.seq,r=typeof e.mgCall=="string"?e.mgCall:void 0,n=O(e);if("error"in n){this.#e(S(h,n.code,n.error,{seq:t,mgCall:r})),console.error(`Stallion: snapshot rejected \u2014 ${n.error}`);return}let o=n.job,s=api.exec(k,this.#n(D(o),t));if(this.#a(t,i=>{let _=typeof i.result=="object"&&i.result!==null?i.result:{};return{..._,seq:i.seq,kind:h,ok:i.ok===!0&&_.ok!==!1}}),!s){this.#e(S(h,y.EXEC_FAILED,"Snapshot script failed to execute in the Cavalry script host.",{seq:t,mgCall:r})),console.error("Stallion: snapshot script failed to execute");return}};#l=e=>{let t=e.seq,n=(Array.isArray(e.frames)?e.frames:[]).map(l=>Math.round(Number(l))).filter(l=>Number.isFinite(l)&&Math.abs(l)<1e9);if(!n.length){this.#e({kind:"render-frames",seq:t,ok:!1,error:"render-frames requires a non-empty frames array"});return}if(n.length>2e3){this.#e({kind:"render-frames",seq:t,ok:!1,error:"render-frames accepts at most 2000 frames per batch"});return}let o=Number(e.resolutionScale),s=Number.isFinite(o)&&o>0?Math.min(4,Math.max(.01,o)):.5,i=e.format==="raw_rgba"?"raw_rgba":"png_buffer",_=typeof e.compId=="string"&&e.compId.trim()?e.compId.trim():"",c=typeof e.outDir=="string"&&e.outDir.trim()?e.outDir.trim():"",d=api.exec(k,U({frames:n,scale:s,format:i,compId:_,outDir:c,seq:t}));if(this.#a(t,l=>{let f=typeof l.result=="object"&&l.result!==null?l.result:{};return{...f,type:l.type,seq:l.seq,kind:"render-frames",ok:l.ok===!0&&f.ok!==!1}}),!d){this.#e({kind:"render-frames",seq:t,ok:!1,error:"Script failed to execute"}),console.error("Stallion: render-frames script failed to execute");return}console.log("Stallion: render-frames batch executed")}};function U(a){return`var __rf = ${JSON.stringify(a)};
 var __read = function (fn) { try { return fn(); } catch (e) { return null; } };
 var __prevComp = __read(function () { return api.getActiveComp(); });
 var __compId = __rf.compId || __prevComp;
@@ -355,4 +596,4 @@ __result = {
 	rendered: __rendered,
 	failed: __failed,
 	inlineNote: __inlineNote
-};`}var N="2.4.0",O=cavalry.versionLessThan(N);if(O)throw new Error(`Stallion requires Cavalry ${N} or higher`);var d=p.loadConfig(),m=new api.WebServer,w=new p(m,d);m.listen(d.host,d.port);m.addCallbackObject(w);m.setHighFrequency();d.token&&(m.setTokenAuthentication(d.token),console.warn("Stallion: token authentication enabled via stallion.json"));w.serveStatus();var I={CENTRE:1},E=new ui.Label(`v${k} \u2014 listening on ${d.host}:${d.port}`);E.setAlignment(I.CENTRE);var T=new ui.Label("[Documentation](https://github.com/akspro9866-art/stallion#readme)");T.setAlignment(I.CENTRE);var y=new ui.VLayout;y.addStretch();y.add(E,T);y.addStretch();ui.setTitle("Stallion");ui.add(y);ui.show();})();
+};`}var P="2.4.0",X=cavalry.versionLessThan(P);if(X)throw new Error(`Stallion requires Cavalry ${P} or higher`);var p=g.loadConfig(),b=new api.WebServer,M=new g(b,p);b.listen(p.host,p.port);b.addCallbackObject(M);b.setHighFrequency();p.token&&(b.setTokenAuthentication(p.token),console.warn("Stallion: token authentication enabled via stallion.json"));M.serveStatus();var q={CENTRE:1},j=new ui.Label(`v${E} \u2014 listening on ${p.host}:${p.port}`);j.setAlignment(q.CENTRE);var B=new ui.Label("[Documentation](https://github.com/akspro9866-art/stallion#readme)");B.setAlignment(q.CENTRE);var A=new ui.VLayout;A.addStretch();A.add(j,B);A.addStretch();ui.setTitle("Stallion");ui.add(A);ui.show();})();
