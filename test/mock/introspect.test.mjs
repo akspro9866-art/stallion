@@ -1,5 +1,5 @@
 /**
- * Introspection contract tests — run with `node --test test/*.test.mjs`.
+ * Introspection contract tests — run with `npm test`.
  *
  * These exercise the readback and snapshot runtime *scripts* (the exact source
  * string the live bridge hands to `api.exec`), not a TypeScript re-implementation
@@ -18,8 +18,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { startMockServer } from '../dist/stallion-mock.mjs'
-import { removeTreeSync } from './fs-safe.mjs'
+import { startMockServer } from '../../dist/stallion-mock.mjs'
+import { removeTreeSync } from '../helpers/fs-safe.mjs'
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47]
 

@@ -8,7 +8,7 @@
  * sit at the end of a check block, the throw is reported as a test failure and
  * hides the result that actually passed.
  *
- * Same policy as `cavalry-mcp/src/fs-safe.ts`: five retries at 150 ms, and a
+ * Same policy as `cavalry-mcp/src/shared/fs-safe.ts`: five retries at 150 ms, and a
  * tree that is already gone counts as success. Kept as a separate file because
  * Stallion ships as a VS Code extension and its `dist/` bundle must not grow a
  * dependency on anything outside `src/`; this is test-only code.
@@ -63,17 +63,4 @@ export function removeTreeSync(target, options = {}) {
     }
   }
   return maxRetries + 1
-}
-
-/**
- * Tear down without letting a locked file turn a passing check into a failure.
- * Use in `finally` blocks that run after the assertions already succeeded.
- */
-export function tryRemoveTreeSync(target, options = {}) {
-  try {
-    removeTreeSync(target, options)
-    return true
-  } catch {
-    return false
-  }
 }

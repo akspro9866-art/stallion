@@ -122,7 +122,7 @@ function textGeometry(scene: MockScene, layer: MockLayer): ShapeGeometry {
 }
 
 /** Render one frame of the mock scene into an RGBA buffer. */
-export function rasterizeFrame(scene: MockScene, compId: string, frame: number, width: number, height: number): RasterizedFrame {
+export function rasterizeFrame(scene: MockScene, compId: string, _frame: number, width: number, height: number): RasterizedFrame {
 	const comp = scene.comps.get(compId)
 	const w = Math.max(1, Math.round(width))
 	const h = Math.max(1, Math.round(height))

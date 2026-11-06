@@ -1,2 +1,9 @@
 node_modules
 .DS_Store
+
+# Build output: rebuilt by npm run build and before packaging.
+dist/
+
+# VS Code extension-host download and packaged artifacts.
+.vscode-test/
+*.vsix

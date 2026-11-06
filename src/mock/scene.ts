@@ -96,7 +96,7 @@ export const EASE_ALIASES: Record<string, string> = {
 }
 
 function cubicBezierY(p: [number, number, number, number], t: number): number {
-	const [x1, y1, x2, y2] = p
+	const [, y1, , y2] = p
 	const u = 1 - t
 	return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t
 }
@@ -379,14 +379,10 @@ export class MockScene {
 		const inW = Math.min(Math.max(b.inWeight ?? span / 3, 0), span)
 		const tanOut = Math.tan(((((a.outAngle ?? 0) % 360) + 360) % 360) * (Math.PI / 180))
 		const tanIn = Math.tan(((((b.inAngle ?? 0) % 360) + 360) % 360) * (Math.PI / 180))
-		const p0x = 0
-		const p0y = 0
 		const p1x = outW / span
 		const p1y = (tanOut * outW) / span
 		const p2x = 1 - inW / span
 		const p2y = 1 - (tanIn * inW) / span
-		const p3x = 1
-		const p3y = 1
 		let lo = 0
 		let hi = 1
 		let s = t

@@ -2,10 +2,7 @@ import js from '@eslint/js'
 import globals from 'globals'
 import tseslint from 'typescript-eslint'
 
-/**
- * Flat ESLint 9 config. The legacy .eslintrc.json is kept for older editors
- * but ESLint 9 no longer reads it.
- */
+/** Flat ESLint 9 config. ESLint 9 does not read `.eslintrc.json`. */
 export default tseslint.config(
 	{
 		ignores: [
@@ -55,12 +52,12 @@ export default tseslint.config(
 	{
 		// Mocha globals belong to the VS Code suite only; *.test.mjs files use
 		// node:test's own `test` import and must not see a mocha `test` global.
-		files: ['test/suite/**/*.{js,mjs,cjs}'],
+		files: ['test/vscode/suite/**/*.{js,mjs,cjs}'],
 		languageOptions: {
 			sourceType: 'commonjs',
 			globals: {
 				// Explicit Mocha globals (globals.mocha also claims `run`,
-				// which collides with test/suite/index.js).
+				// which collides with test/vscode/suite/index.js).
 				describe: 'readonly',
 				it: 'readonly',
 				before: 'readonly',

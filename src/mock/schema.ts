@@ -180,10 +180,6 @@ export function isKnownAttribute(type: string, path: string): boolean {
 	return false
 }
 
-export function attributeDefault(type: string, path: string): unknown {
-	return nodeDef(type).attributes[path]?.default
-}
-
 /** Attribute paths every valid layer accepts — used for connect() checks. */
 export function isConnectableAttribute(type: string, attr: string): boolean {
 	return isKnownAttribute(type, attr) || attr === 'deformers' || attr === 'generator' || attr === 'masks'

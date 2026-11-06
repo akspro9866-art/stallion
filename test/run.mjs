@@ -9,11 +9,18 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
-const files = fs
-	.readdirSync(testDir)
-	.filter((name) => name.endsWith('.test.mjs'))
-	.sort()
-	.map((name) => path.join(testDir, name))
+
+function collect(directory) {
+	const found = []
+	for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+		const full = path.join(directory, entry.name)
+		if (entry.isDirectory()) found.push(...collect(full))
+		else if (entry.name.endsWith('.test.mjs')) found.push(full)
+	}
+	return found
+}
+
+const files = collect(testDir).sort()
 
 if (files.length === 0) {
 	console.error('no *.test.mjs files found')

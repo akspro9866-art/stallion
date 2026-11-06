@@ -12,7 +12,7 @@
  *   5. expression-type posts report applied/skipped lists
  *   6. stallion.json config: host/port/token honoured
  *
- * Run: node test/bridge-protocol.mjs   (exit 0 = all assertions passed)
+ * Run: node test/protocol/bridge-protocol.mjs   (exit 0 = all assertions passed)
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -20,13 +20,13 @@ import vm from 'node:vm'
 import os from 'node:os'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { removeTreeSync } from './fs-safe.mjs'
+import { removeTreeSync } from '../helpers/fs-safe.mjs'
 
 // fileURLToPath handles the `C:/` vs `/` split for us; hand-rolled regexes
 // against the drive letter are exactly the platform-specific path arithmetic
 // this suite has to stay free of.
 const here = path.dirname(fileURLToPath(import.meta.url))
-const dist = path.resolve(here, '../dist/Stallion.js')
+const dist = path.resolve(here, '../../dist/Stallion.js')
 const code = fs.readFileSync(dist, 'utf8')
 
 function makeMockApi({ appDataFolder = null, execMode = 'shared' } = {}) {

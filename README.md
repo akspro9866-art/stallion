@@ -99,6 +99,9 @@ but never exits. The production build writes:
 | `dist/extension.js` | The VS Code extension (CommonJS, `vscode` external) |
 | `dist/stallion-mock.mjs` | The headless mock bridge CLI (ESM, executable) |
 
+`dist/` is build output and is not tracked; a fresh checkout has to run the build before using the
+extension, the mock CLI or the protocol test. CI does this on every push.
+
 ### 2. Get `Stallion.js` into Cavalry
 
 The VS Code extension installs it automatically on activation: it copies `dist/Stallion.js` to
@@ -736,10 +739,11 @@ npm run test:vscode          # extension-host suite (downloads Electron; not in 
 npm run lint                 # ESLint
 ```
 
-`npm test` runs `eslint .`, then `node test/bridge-protocol.mjs` (nine protocol scenarios against the
-built `dist/Stallion.js` in a sandboxed `api`/`ui`/`cavalry` realm), then `node test/run.mjs`, which
-executes the `*.test.mjs` files with Node's test runner: **25 tests** covering readback, snapshots,
-batch rendering, receipts, expression dispatch, `seq` matching and token auth.
+`npm test` runs `eslint .`, then `node test/protocol/bridge-protocol.mjs` (nine protocol scenarios
+against the built `dist/Stallion.js` in a sandboxed `api`/`ui`/`cavalry` realm), then
+`node test/run.mjs`, which recursively collects every `*.test.mjs` under `test/` and runs it with
+Node's test runner: **25 tests** covering readback, snapshots, batch rendering, receipts, expression
+dispatch, `seq` matching and token auth.
 
 CI runs on `ubuntu-latest` and `windows-latest` across Node 20, 22 and 24. It performs a production
 build, then `npm test`. The VS Code extension-host suite is deliberately excluded because it needs a
@@ -756,13 +760,17 @@ src/vscode/extension.ts              Command registration and script installatio
 src/vscode/commands/                 post, post as, insert types, install, shared helpers
 src/mock/                            In-memory scene, mock api, rasterizer, HTTP server
 src/node/mock-cli.ts                 `--mock` CLI entry
-dist/                                Built bundles (checked in)
-test/                                Protocol smoke test, node:test suites, VS Code suite
+scripts/build.mjs                    esbuild bundle definitions
+test/protocol/                       Sandboxed wire-protocol smoke test against dist/Stallion.js
+test/mock/                           node:test suites for the mock bridge and introspection
+test/helpers/                        Windows-safe scratch-tree teardown shared by the suites
+test/vscode/                         Extension-host runner and Mocha suite (local only)
+test/run.mjs                         Recursive *.test.mjs discovery for Node's test runner
+dist/                                Build output (ignored; run npm run build first)
 ```
 
-`cavalry-bridge-0.9.0.vsix` in the repository root is a legacy packaged artifact from before 0.10.0.
-It does not contain receipts, readback, `render-frames` or the mock. Build 0.10.0 from source; do not
-install that VSIX expecting the current protocol.
+Packaged `.vsix` files are build artifacts too: they are ignored by Git and excluded from the
+extension bundle. Generate one with `npx @vscode/vsce package` when you need to install it.
 
 ## Limitations
 
@@ -785,7 +793,6 @@ install that VSIX expecting the current protocol.
   PNG file is the visual evidence.
 - **Scene save/open stops the bridge.** Cavalry resets script contexts; re-run **Scripts → Stallion**.
 - **`ui.scriptLocation` points at a temporary path** when the VS Code document has not been saved.
-- **The VSIX in the root is stale** (0.9.0); the source builds 0.10.0.
 - **No marketplace release from this fork**, no TLS, and token auth is optional. Leave the default
   loopback bind unless you know why you are changing it.
 

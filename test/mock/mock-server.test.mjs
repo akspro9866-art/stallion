@@ -1,5 +1,5 @@
 /**
- * Mock bridge contract tests — run with `node --test test/*.test.mjs`.
+ * Mock bridge contract tests — run with `npm test`.
  *
  * These prove the --mock bridge speaks the same wire contract as the live
  * bridge and that its telemetry, schema validation, interpolation and
@@ -9,7 +9,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { startMockServer } from '../dist/stallion-mock.mjs'
+import { startMockServer } from '../../dist/stallion-mock.mjs'
 
 async function withServer(fn, options = {}) {
 	const handle = await startMockServer({ port: 0, ...options })
