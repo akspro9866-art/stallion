@@ -29,12 +29,15 @@ import { encodePng, rasterizeFrame } from './raster.ts'
 import {
 	ERROR_CODES,
 	LAYERS_TYPE,
+	SNAPSHOT_BATCH_TYPE,
 	SNAPSHOT_TYPE,
 	STATE_TYPE,
 	errorEnvelope,
 	normalizeReadbackJob,
+	normalizeSnapshotBatchJob,
 	normalizeSnapshotJob,
 	readbackScript,
+	snapshotBatchScript,
 	snapshotScript,
 } from '../cavalry/modules/Introspect.ts'
 
@@ -74,7 +77,7 @@ interface ConsoleEntry {
  * Unknown keys are ignored rather than rejected: a client asking for `?debug=1` should
  * still get its scene back.
  */
-function introspectQuery(url: URL, kind: 'state' | 'layers' | 'snapshot'): Record<string, unknown> {
+function introspectQuery(url: URL, kind: 'state' | 'layers' | 'snapshot' | 'snapshot-batch'): Record<string, unknown> {
 	const q = url.searchParams
 	const pick = (...names: string[]): string | null => {
 		for (const name of names) {
@@ -86,13 +89,22 @@ function introspectQuery(url: URL, kind: 'state' | 'layers' | 'snapshot'): Recor
 	const parsed: Record<string, unknown> = { type: kind, seq: pick('seq') ?? `get-${kind}-${Date.now()}` }
 	const frame = pick('frame', 't')
 	if (frame !== null) parsed.frame = frame
-	if (kind === 'snapshot') {
+	if (kind === 'snapshot' || kind === 'snapshot-batch') {
 		const scale = pick('scale', 'resolutionScale')
 		if (scale !== null) parsed.scale = scale
 		const outDir = pick('outDir', 'out')
 		if (outDir !== null) parsed.outDir = outDir
 		const fileName = pick('fileName', 'name')
 		if (fileName !== null) parsed.fileName = fileName
+		if (kind === 'snapshot-batch') {
+			const frames = pick('frames')
+			if (frames !== null) parsed.frames = frames.split(',').map((s) => s.trim()).filter(Boolean)
+			const layerIds = pick('layerIds')
+			if (layerIds !== null) parsed.layerIds = layerIds.split(',').map((s) => s.trim()).filter(Boolean)
+			const attrs = pick('attrs')
+			if (attrs !== null) parsed.attrs = attrs.split(',').map((s) => s.trim()).filter(Boolean)
+			if (/^(1|true|yes)$/i.test(pick('includeHidden') ?? '')) parsed.includeHidden = true
+		}
 	} else {
 		const offset = pick('offset')
 		if (offset !== null) parsed.offset = offset
@@ -290,7 +302,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			renderFrames: true,
 			// Same shape as the live heartbeat: introspection is a `type` on POST /post,
 			// and only the mock additionally answers GET /state, /layers and /frame.
-			introspect: ['state', 'layers', 'snapshot'],
+			introspect: ['state', 'layers', 'snapshot', 'snapshot-batch'],
 			errorEnvelope: 1,
 			mock: true,
 		},
@@ -416,6 +428,29 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return envelope
 	}
 
+	const handleSnapshotBatchPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const normalized = normalizeSnapshotBatchJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(SNAPSHOT_BATCH_TYPE, normalized.code, normalized.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		const envelope = runIntrospect(snapshotBatchScript(normalized.job), SNAPSHOT_BATCH_TYPE, parsed)
+		const frames = Array.isArray(envelope.frames) ? (envelope.frames as Array<Record<string, unknown>>) : []
+		for (const entry of frames) {
+			const file = typeof entry.file === 'string' ? entry.file : ''
+			if (!file || !fs.existsSync(file)) continue
+			try {
+				entry.contentHash = createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+			} catch {
+				/* sizeBytes remains the verification evidence */
+			}
+		}
+		return envelope
+	}
+
 	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
 		const code = typeof parsed.code === 'string' ? parsed.code : ''
@@ -454,6 +489,33 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return envelope
 	}
 
+	/**
+	 * A batch answer carries paths and boxes; the mock can additionally hand back
+	 * pixels because it is real Node. Keep the payload bounded to the first 16
+	 * frames. The live bridge cannot inline — its script host has no binary read —
+	 * so the field is simply absent there rather than null.
+	 */
+	const applyBatchInline = (envelope: Record<string, unknown>, parsed: Record<string, unknown>, url: URL): void => {
+		if (envelope.ok !== true) return
+		const frames = Array.isArray(envelope.frames) ? (envelope.frames as Array<Record<string, unknown>>) : []
+		const comp = scene.comps.get(String(envelope.compId ?? '')) ?? scene.activeComp()
+		const pct = Number(envelope.scale)
+		if (!inlineWanted(parsed, url) || !comp || !Number.isFinite(pct) || pct <= 0) return
+		const width = Math.max(1, Math.round(comp.width * (pct / 100)))
+		const height = Math.max(1, Math.round(comp.height * (pct / 100)))
+		for (const entry of frames.slice(0, 16)) {
+			const file = typeof entry.file === 'string' ? entry.file : ''
+			const sidecar = `${file}.rgba`
+			if (!file || !fs.existsSync(sidecar)) continue
+			const rgba = fs.readFileSync(sidecar)
+			if (rgba.length === width * height * 4) {
+				entry.pngBase64 = encodePng(rgba, width, height).toString('base64')
+				entry.width = width
+				entry.height = height
+			}
+		}
+	}
+
 	const server = http.createServer((request, response) => {
 		void (async () => {
 			const url = new URL(request.url ?? '/', 'http://localhost')
@@ -464,7 +526,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			if (request.method === 'GET' && url.pathname === '/') {
 				const body =
 					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, ' +
-					'GET|POST /state, /layers, /frame, /snapshot\n'
+					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
@@ -482,11 +544,13 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			const introspectPath =
 				url.pathname === '/state' || url.pathname === '/layers'
 					? url.pathname.slice(1)
-					: url.pathname === '/frame' || url.pathname === '/snapshot'
-						? 'snapshot'
-						: null
+					: url.pathname === '/snapshot-batch'
+						? 'snapshot-batch'
+						: url.pathname === '/frame' || url.pathname === '/snapshot'
+							? 'snapshot'
+							: null
 			if (introspectPath && (request.method === 'GET' || request.method === 'HEAD' || request.method === 'POST')) {
-				let parsed = introspectQuery(url, introspectPath as 'state' | 'layers' | 'snapshot')
+				let parsed = introspectQuery(url, introspectPath as 'state' | 'layers' | 'snapshot' | 'snapshot-batch')
 				if (request.method === 'POST') {
 					try {
 						const raw = await readBody(request)
@@ -500,8 +564,15 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					}
 				}
 				const envelope =
-					introspectPath === 'snapshot' ? handleSnapshotPost(parsed) : handleReadbackPost(introspectPath, parsed)
+					introspectPath === 'snapshot'
+						? handleSnapshotPost(parsed)
+						: introspectPath === 'snapshot-batch'
+							? handleSnapshotBatchPost(parsed)
+							: handleReadbackPost(introspectPath, parsed)
 				lastPayload = envelope
+				if (introspectPath === 'snapshot-batch') {
+					applyBatchInline(envelope, parsed, url)
+				}
 				if (introspectPath === 'snapshot' && envelope.ok === true) {
 					// A snapshot exists to short-circuit disk polling, so the mock hands the
 					// pixels back rather than only naming a file. The live bridge cannot do
@@ -587,6 +658,10 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === SNAPSHOT_TYPE) {
 						envelope = handleSnapshotPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === SNAPSHOT_BATCH_TYPE) {
+						envelope = handleSnapshotBatchPost(parsed)
+						applyBatchInline(envelope, parsed, url)
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)

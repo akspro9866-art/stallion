@@ -340,8 +340,17 @@ export class MockApi {
 	getBoundingBox(id: string, world?: boolean): Record<string, unknown> | null {
 		const box = this.scene.boundingBox(String(id))
 		if (!box) return null
-		if (world === false) return { x: box.centre.x, y: box.centre.y, width: box.width, height: box.height }
-		return { x: box.x, y: box.y, width: box.width, height: box.height, centre: box.centre }
+		// Both spaces report a top-left-origin box. The mock is flat (no nested
+		// comp transforms), so comp-space equals world-space; the distinction is
+		// still made in the payload so a caller can branch on it as it does live.
+		return {
+			x: box.x,
+			y: box.y,
+			width: box.width,
+			height: box.height,
+			centre: box.centre,
+			world: world !== false,
+		}
 	}
 
 	getSelectionBoundingBox(): Record<string, number> | null {

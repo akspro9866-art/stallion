@@ -41,6 +41,29 @@
 export const STATE_TYPE = 'state'
 export const LAYERS_TYPE = 'layers'
 export const SNAPSHOT_TYPE = 'snapshot'
+export const SNAPSHOT_BATCH_TYPE = 'snapshot-batch'
+
+/**
+ * Layer types that deform or distribute another layer's geometry. Used to
+ * classify a layer's children without a second scene walk, so a caller can see
+ * the active procedural rig (subMesh, align, duplicator, stagger, noise…) at
+ * the frame it measured rather than inferring it from connections alone.
+ */
+export const DEFORMER_TYPES = [
+	'subMesh',
+	'align',
+	'duplicator',
+	'stagger',
+	'falloff',
+	'noise',
+	'noiseDeformer',
+	'oscillator',
+	'valueBehavior',
+	'javascriptDeformer',
+	'round',
+	'offsetPath',
+	'trimPath',
+] as const
 
 /** Defaults for one readback slice. Sized so a slice stays well under a frame. */
 export const READBACK_DEFAULT_LIMIT = 200
@@ -143,6 +166,27 @@ export interface SnapshotJob {
 	fileName: string
 }
 
+/**
+ * Batch snapshot job: render several critical frames in one `api.exec` call and
+ * return the per-frame file plus the evaluated layer boxes at that same frame.
+ *
+ * `layerIds` is optional; an empty list means every top-level layer. `attrs`
+ * adds evaluated values to each layer entry, which lets a convergence loop read
+ * a transform and its rendered pixels from one round trip.
+ */
+export interface SnapshotBatchJob {
+	seq: unknown
+	compId: string
+	frames: number[]
+	restoreFrame: number | null
+	scale: number
+	outDir: string
+	fileName: string
+	layerIds: string[]
+	attrs: string[]
+	includeHidden: boolean
+}
+
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
 	const n = Number(value)
 	if (!Number.isFinite(n)) return fallback
@@ -173,6 +217,12 @@ export function normalizeReadbackJob(
 	}
 }
 
+/** One filesystem-safe stem; the bridge uses the same rule for every kind. */
+export function safeFileName(value: unknown, fallback: string): string {
+	const raw = typeof value === 'string' ? value.trim() : ''
+	return (raw || fallback).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
+}
+
 export function normalizeSnapshotJob(
 	parsed: Record<string, unknown>,
 ): { job: SnapshotJob } | { error: string; code: ErrorCode } {
@@ -181,10 +231,7 @@ export function normalizeSnapshotJob(
 		return { error: 'snapshot requires a numeric `frame` (or `t`).', code: ERROR_CODES.NO_FRAME }
 	}
 	const scale = Number(parsed.scale ?? parsed.resolutionScale)
-	const fileName =
-		typeof parsed.fileName === 'string' && parsed.fileName.trim()
-			? parsed.fileName.trim().replace(/[\\/:*?"<>|]/g, '_').slice(0, 80)
-			: `snapshot-${String(Math.round(frame)).padStart(6, '0')}`
+	const fileName = safeFileName(parsed.fileName, `snapshot-${String(Math.round(frame)).padStart(6, '0')}`)
 	return {
 		job: {
 			seq: parsed.seq,
@@ -196,6 +243,52 @@ export function normalizeSnapshotJob(
 			// from a Windows and a Linux caller.
 			outDir: typeof parsed.outDir === 'string' ? parsed.outDir.trim().replace(/\\/g, '/') : '',
 			fileName,
+		},
+	}
+}
+
+/**
+ * Normalise a batch snapshot request. Frames are deduped and sorted so two
+ * callers asking for the same set produce the same files in the same order; the
+ * cap exists because every frame is a synchronous PNG render on Cavalry's UI
+ * thread. Layer ids and attrs are bounded like the readback path.
+ */
+export function normalizeSnapshotBatchJob(
+	parsed: Record<string, unknown>,
+): { job: SnapshotBatchJob } | { error: string; code: ErrorCode } {
+	const rawFrames = Array.isArray(parsed.frames) ? parsed.frames : []
+	const seen = new Set<number>()
+	const frames: number[] = []
+	for (const value of rawFrames) {
+		const frame = Math.round(Number(value))
+		if (!Number.isFinite(frame) || Math.abs(frame) > 1e9 || seen.has(frame)) continue
+		seen.add(frame)
+		frames.push(frame)
+		if (frames.length >= 64) break
+	}
+	if (!frames.length) {
+		return { error: 'snapshot-batch requires a non-empty numeric `frames` array (1..64).', code: ERROR_CODES.NO_FRAME }
+	}
+	frames.sort((a, b) => a - b)
+	const scale = Number(parsed.scale ?? parsed.resolutionScale)
+	const layerIds = Array.isArray(parsed.layerIds)
+		? (parsed.layerIds as unknown[]).map((id) => (typeof id === 'string' ? id.trim() : '')).filter(Boolean).slice(0, 200)
+		: []
+	const attrs = Array.isArray(parsed.attrs)
+		? (parsed.attrs as unknown[]).map((a) => (typeof a === 'string' ? a.trim() : '')).filter(Boolean).slice(0, 16)
+		: []
+	return {
+		job: {
+			seq: parsed.seq,
+			compId: typeof parsed.compId === 'string' ? parsed.compId.trim() : '',
+			frames,
+			restoreFrame: null,
+			scale: Number.isFinite(scale) && scale > 0 ? clampInt(scale, 100, 1, 400) : 100,
+			outDir: typeof parsed.outDir === 'string' ? parsed.outDir.trim().replace(/\\/g, '/') : '',
+			fileName: safeFileName(parsed.fileName, 'snapshot-batch'),
+			layerIds,
+			attrs,
+			includeHidden: parsed.includeHidden === true,
 		},
 	}
 }
@@ -239,6 +332,18 @@ var __box = function (bb) {
 	var h = arr ? bb[3] : (bb.height === undefined ? bb.h : bb.height);
 	return { x: __num(arr ? bb[0] : bb.x, 0), y: __num(arr ? bb[1] : bb.y, 0), width: __num(w, 0), height: __num(h, 0) };
 };
+// A measured box is only useful to a calibration loop if the pivot and the
+// centre are explicit. pivotX/Y are the pivot's offset *inside* the box, so a
+// caller never has to guess whether the box or the pivot is top-left based.
+var __pivotInBox = function (box, pivot) {
+	if (!box || !pivot) return box;
+	return {
+		x: box.x, y: box.y, width: box.width, height: box.height,
+		pivotX: __num(pivot.x, 0) - box.x,
+		pivotY: __num(pivot.y, 0) - box.y,
+		centre: { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+	};
+};
 var __started = Date.now();
 var __prevComp = __read(function () { return api.getActiveComp(); });
 var __compId = __rb.compId || __prevComp;
@@ -262,6 +367,30 @@ var __ids = __read(function () { return api.getCompLayers(false); }) || [];
 var __top = __read(function () { return api.getCompLayers(true); }) || [];
 var __topSet = {};
 for (var t = 0; t < __top.length; t++) __topSet[__top[t]] = true;
+
+// One parent walk builds the child map and the deformer classification without
+// a getChildren call per layer (not every 2.8 build exposes it, and the walk is
+// already bounded by the readback limit).
+var __deformerTypes = ${JSON.stringify(DEFORMER_TYPES)};
+var __deformerSet = {};
+for (var d0 = 0; d0 < __deformerTypes.length; d0++) __deformerSet[__deformerTypes[d0]] = true;
+var __deformerType = function (type) {
+	var raw = String(type == null ? '' : type);
+	if (__deformerSet[raw]) return true;
+	var lower = raw.toLowerCase();
+	for (var d1 = 0; d1 < __deformerTypes.length; d1++) {
+		if (__deformerTypes[d1].toLowerCase() === lower) return true;
+	}
+	return lower.indexOf('deformer') >= 0;
+};
+var __children = {};
+for (var c0 = 0; c0 < __ids.length; c0++) {
+	var __childParent = __read(function () { return api.getParent(__ids[c0]); });
+	if (__childParent) {
+		if (!__children[__childParent]) __children[__childParent] = [];
+		__children[__childParent].push(__ids[c0]);
+	}
+}
 
 // Depth from the comp root, so a hierarchy can be rebuilt without a second pass.
 var __depth = {};
@@ -323,18 +452,53 @@ for (var k = __rb.offset; k < __total; k++) {
 		path: chain,
 		depth: depthOf(id),
 		topLevel: __topSet[id] === true,
+		parent: parent || null,
+		parentName: parent ? (__names[parent] || null) : null,
+		hidden: false,
+		visible: true,
 		inFrame: __read(function () { return api.getInFrame(id); }),
 		outFrame: __read(function () { return api.getOutFrame(id); }),
 		boundingBox: null,
+		worldBoundingBox: null,
+		compBoundingBox: null,
 		pivot: null,
+		deformers: [],
+		childCount: __children[id] ? __children[id].length : 0,
 		attrs: {},
 		connected: [],
 		unreadable: []
 	};
-	var bb = __box(__read(function () { return api.getBoundingBox(id, true); }));
-	if (bb) entry.boundingBox = bb;
+	var hidden = __read(function () { return api.get(id, 'hidden'); });
+	entry.hidden = hidden === true || hidden === 1 || hidden === 'true';
+	entry.visible = !entry.hidden;
+	if (entry.visible) {
+		// A layer outside its in/out range is not visible at this frame even when
+		// the hidden flag is false. Report that as visibility, not as a box of 0.
+		var __if = entry.inFrame, __of = entry.outFrame;
+		if (typeof __if === 'number' && typeof __of === 'number' && (__frame < __if || __frame > __of)) entry.visible = false;
+	}
 	var pv = __read(function () { return api.getPivotPosition(id); });
 	if (pv) entry.pivot = { x: __num(Array.isArray(pv) ? pv[0] : pv.x, 0), y: __num(Array.isArray(pv) ? pv[1] : pv.y, 0) };
+	var worldBox = __pivotInBox(__box(__read(function () { return api.getBoundingBox(id, true); })), entry.pivot);
+	var compBox = __pivotInBox(__box(__read(function () { return api.getBoundingBox(id, false); })), entry.pivot);
+	if (worldBox) entry.worldBoundingBox = worldBox;
+	if (compBox) entry.compBoundingBox = compBox;
+	// The legacy boundingBox field keeps its historical meaning (world space) so
+	// existing callers do not change behaviour; the two explicit fields are the
+	// new contract for calibration and perceptual diffing.
+	if (worldBox) entry.boundingBox = worldBox;
+	else if (compBox) entry.boundingBox = compBox;
+	var kids = __children[id] || [];
+	for (var kd = 0; kd < kids.length && entry.deformers.length < 16; kd++) {
+		var kidType = __read(function () { return api.getLayerType(kids[kd]); });
+		if (!__deformerType(kidType)) continue;
+		entry.deformers.push({
+			id: kids[kd],
+			type: kidType,
+			name: __read(function () { return api.getNiceName(kids[kd]); }),
+			visible: __read(function () { var h = api.get(kids[kd], 'hidden'); return !(h === true || h === 1 || h === 'true'); }) !== false
+		});
+	}
 
 	var want = __rb.attrs;
 	if (__rb.includeAttributes) {
@@ -475,6 +639,140 @@ return {
 	frameHash: __frameHash,
 	error: __error,
 	code: __code
+};
+})()`;
+}
+
+/**
+ * Multi-frame snapshot runtime.
+ *
+ * Renders every requested critical frame in one `api.exec` call, verifying each
+ * PNG in the same call (size + existence) and returning the evaluated layer
+ * boxes at that frame. The playhead and active comp are restored exactly once,
+ * after the last frame, so a six-frame convergence pass costs one host round
+ * trip instead of six.
+ *
+ * Layer entries deliberately mirror the readback shape (`id`, `ref`, `type`,
+ * `name`, `visible`, `bbox`), but the box always carries `pivotX`, `pivotY`
+ * and `centre`, so Stage 5 can compute a signed position residual without a
+ * second `/layers` request for the same frame.
+ */
+export function snapshotBatchScript(job: SnapshotBatchJob): string {
+	return `/* cavalry-mcp:atomic */ (function () {
+var __sb = ${JSON.stringify(job)};
+var __read = function (fn) { try { return fn(); } catch (e) { return null; }; };
+var __num = function (v, fallback) { var n = Number(v); return isFinite(n) ? n : fallback; };
+var __pad = function (n) { var s = String(n); while (s.length < 6) { s = '0' + s; } return s; };
+var __box = function (bb) {
+	if (!bb || typeof bb !== 'object') return null;
+	var arr = Array.isArray(bb);
+	var w = arr ? bb[2] : (bb.width === undefined ? bb.w : bb.width);
+	var h = arr ? bb[3] : (bb.height === undefined ? bb.h : bb.height);
+	return { x: __num(arr ? bb[0] : bb.x, 0), y: __num(arr ? bb[1] : bb.y, 0), width: __num(w, 0), height: __num(h, 0) };
+};
+var __dig = function (str) {
+	var hi = 0x811c9dc5, lo = 0x1b873593;
+	for (var p = 0; p < str.length; p++) {
+		hi ^= str.charCodeAt(p); hi = Math.imul(hi, 0x01000193) >>> 0;
+		lo ^= str.charCodeAt(str.length - 1 - p); lo = Math.imul(lo, 0x01000193) >>> 0;
+	}
+	return ('00000000' + hi.toString(16)).slice(-8) + ('00000000' + lo.toString(16)).slice(-8);
+};
+var __prevComp = __read(function () { return api.getActiveComp(); });
+var __prevFrame = __num(__read(function () { return api.getFrame(); }), 0);
+if (__sb.compId && __sb.compId !== __prevComp) { __read(function () { api.setActiveComp(__sb.compId); }); }
+var __compId = __sb.compId || __prevComp;
+if (!__compId) {
+	return { ok: false, kind: 'snapshot-batch', seq: __sb.seq, error: 'No active comp to render.', code: 'STALLION_NO_ACTIVE_COMP', frames: [] };
+}
+var __dir = __sb.outDir || (api.getHomeFolder() + '/.stallion/snapshots');
+var __all = __read(function () { return api.getCompLayers(false); }) || [];
+var __index = {};
+for (var ai = 0; ai < __all.length; ai++) __index[__all[ai]] = ai;
+var __ids = __sb.layerIds && __sb.layerIds.length ? __sb.layerIds : (__read(function () { return api.getCompLayers(false); }) || []).slice(0, 200);
+var __started = Date.now();
+var __frames = [];
+var __errors = [];
+for (var f = 0; f < __sb.frames.length; f++) {
+	var __frame = __sb.frames[f];
+	var __stem = __dir + '/' + __sb.fileName + '-' + __pad(__frame);
+	var __file = __stem + '.png';
+	var __entry = { frame: __frame, file: __file, exists: false, sizeBytes: null, renderedAt: null, frameHash: null, layers: [], error: null, code: null };
+	__read(function () { api.setFrame(__frame); });
+	try {
+		api.renderPNGFrame(__stem, __sb.scale);
+		__entry.renderedAt = Date.now();
+	} catch (e) {
+		__entry.error = String(e && e.message ? e.message : e);
+		__entry.code = 'STALLION_RENDER_FAILED';
+	}
+	var __bytes = __read(function () { return api.getFileSize(__file); });
+	__entry.sizeBytes = __bytes === null ? null : Number(__bytes);
+	__entry.exists = __bytes === null ? __read(function () { return api.filePathExists(__file); }) === true : Number(__bytes) > 0;
+	if (!__entry.error && !__entry.exists) {
+		__entry.error = 'renderPNGFrame produced no readable file at ' + __file;
+		__entry.code = 'STALLION_RENDER_FAILED';
+	}
+	var __sig = '';
+	for (var l = 0; l < __ids.length; l++) {
+		var __id = __ids[l];
+		var __pivot = __read(function () { return api.getPivotPosition(__id); });
+		var __p = __pivot ? { x: __num(Array.isArray(__pivot) ? __pivot[0] : __pivot.x, 0), y: __num(Array.isArray(__pivot) ? __pivot[1] : __pivot.y, 0) } : null;
+		var __world = __box(__read(function () { return api.getBoundingBox(__id, true); }));
+		var __hidden = __read(function () { return api.get(__id, 'hidden'); });
+		var __visible = !(__hidden === true || __hidden === 1 || __hidden === 'true');
+		if (__visible) {
+			var __in = __read(function () { return api.getInFrame(__id); });
+			var __out = __read(function () { return api.getOutFrame(__id); });
+			if (typeof __in === 'number' && typeof __out === 'number' && (__frame < __in || __frame > __out)) __visible = false;
+		}
+		var __bbox = null;
+		if (__world) {
+			__bbox = {
+				x: __world.x, y: __world.y, width: __world.width, height: __world.height,
+				pivotX: __p ? __p.x - __world.x : __world.width / 2,
+				pivotY: __p ? __p.y - __world.y : __world.height / 2,
+				centre: { x: __world.x + __world.width / 2, y: __world.y + __world.height / 2 }
+			};
+		}
+		var __layer = {
+			id: __id,
+			ref: __read(function () { return api.getLayerType(__id); }) + '#' + (__index[__id] === undefined ? '?' : __index[__id]),
+			type: __read(function () { return api.getLayerType(__id); }),
+			name: __read(function () { return api.getNiceName(__id); }),
+			visible: __visible,
+			bbox: __bbox
+		};
+		if (__sb.attrs && __sb.attrs.length) {
+			var __attrs = {};
+			for (var a = 0; a < __sb.attrs.length; a++) {
+				var __v = __read(function () { return api.get(__id, __sb.attrs[a]); });
+				if (__v !== undefined && __v !== null) __attrs[__sb.attrs[a]] = __v;
+			}
+			__layer.attrs = __attrs;
+		}
+		if (!__sb.includeHidden && !__visible) continue;
+		__sig += __id + '|' + (__bbox ? [__bbox.x, __bbox.y, __bbox.width, __bbox.height].join(',') : '') + ';';
+		__entry.layers.push(__layer);
+	}
+	__entry.frameHash = __dig(String(__frame) + '#' + String(__compId) + '#' + __sig);
+	__frames.push(__entry);
+	if (__entry.error) __errors.push({ frame: __frame, error: __entry.error, code: __entry.code });
+}
+if (__sb.frames.length) __read(function () { api.setFrame(__prevFrame); });
+if (__sb.compId && __prevComp && __sb.compId !== __prevComp) { __read(function () { api.setActiveComp(__prevComp); }); }
+return {
+	ok: __errors.length === 0,
+	kind: 'snapshot-batch',
+	seq: __sb.seq,
+	compId: String(__compId),
+	frames: __frames,
+	errors: __errors,
+	requested: __sb.frames.length,
+	rendered: __frames.length - __errors.length,
+	scale: __sb.scale,
+	restoredFrame: __prevFrame,
+	elapsedMs: Date.now() - __started
 };
 })()`;
 }

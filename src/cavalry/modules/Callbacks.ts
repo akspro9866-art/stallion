@@ -34,14 +34,18 @@ import { RECEIPT_RUNTIME } from './Receipt.ts'
 import {
 	ERROR_CODES,
 	LAYERS_TYPE,
+	SNAPSHOT_BATCH_TYPE,
 	SNAPSHOT_TYPE,
 	STATE_TYPE,
 	errorEnvelope,
 	normalizeReadbackJob,
+	normalizeSnapshotBatchJob,
 	normalizeSnapshotJob,
 	readbackScript,
+	snapshotBatchScript,
 	snapshotScript,
 	type ReadbackJob,
+	type SnapshotBatchJob,
 	type SnapshotJob,
 } from './Introspect.ts'
 
@@ -156,7 +160,7 @@ export class Callbacks {
 				renderFrames: true,
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
-				introspect: ['state', 'layers', 'snapshot'],
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch'],
 				errorEnvelope: 1,
 				mock: false,
 			},
@@ -219,6 +223,10 @@ export class Callbacks {
 		}
 		if (parsed.type === SNAPSHOT_TYPE) {
 			this.#handleSnapshot(parsed)
+			return
+		}
+		if (parsed.type === SNAPSHOT_BATCH_TYPE) {
+			this.#handleSnapshotBatch(parsed)
 			return
 		}
 
@@ -654,6 +662,34 @@ __deliver(__json);
 		if (!success) {
 			this.#serve(errorEnvelope(SNAPSHOT_TYPE, ERROR_CODES.EXEC_FAILED, 'Snapshot script failed to execute in the Cavalry script host.', { seq, mgCall }))
 			console.error('Stallion: snapshot script failed to execute')
+			return
+		}
+	}
+
+	/**
+	 * Multi-frame snapshot loopback: one host call renders every critical frame
+	 * and returns the per-frame file, verification fields and evaluated layer
+	 * boxes. This is the only render path Stage 5 needs; a per-frame loop here
+	 * would multiply the host round trips by the beat count.
+	 */
+	#handleSnapshotBatch = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const normalized = normalizeSnapshotBatchJob(parsed as Record<string, unknown>)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(SNAPSHOT_BATCH_TYPE, normalized.code, normalized.error, { seq, mgCall }))
+			console.error(`Stallion: snapshot-batch rejected — ${normalized.error}`)
+			return
+		}
+		const job: SnapshotBatchJob = normalized.job
+		const success = api.exec(SCRIPT_ID, this.#wrapped(snapshotBatchScript(job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: SNAPSHOT_BATCH_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(SNAPSHOT_BATCH_TYPE, ERROR_CODES.EXEC_FAILED, 'Snapshot-batch script failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: snapshot-batch script failed to execute')
 			return
 		}
 	}
