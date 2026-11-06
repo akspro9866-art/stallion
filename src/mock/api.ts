@@ -57,6 +57,38 @@ export class MockApi {
 		return layer.id
 	}
 
+	/**
+	 * Real 2.8 signature: `convertSVGToLayers(filename): string[]`. The mock
+	 * parses the SVG's viewBox (or width/height) and one `editableShape` per
+	 * `<path d="…">` element — the `d` string becomes `inputPath`, the canvas
+	 * size `generator.dimensions`, so bounding boxes are honest without a real
+	 * vector renderer. Gradients, transforms and non-path elements are ignored.
+	 */
+	convertSVGToLayers(filename: string): string[] {
+		let text: string
+		try {
+			text = fs.readFileSync(this.#sandboxPath(filename), 'utf8')
+		} catch {
+			fail(`convertSVGToLayers: cannot read '${filename}'`)
+		}
+		const viewBox = /viewBox\s*=\s*["']\s*([-\d.eE]+)[\s,]+([-\d.eE]+)[\s,]+([-\d.eE]+)[\s,]+([-\d.eE]+)/i.exec(text)
+		const width = /<svg[^>]*?\bwidth\s*=\s*["']\s*([\d.]+)/i.exec(text)
+		const height = /<svg[^>]*?\bheight\s*=\s*["']\s*([\d.]+)/i.exec(text)
+		const dims: [number, number] = viewBox
+			? [Number(viewBox[3]) || 100, Number(viewBox[4]) || 100]
+			: [Number(width?.[1]) || 100, Number(height?.[1]) || 100]
+		const ids: string[] = []
+		const paths = [...text.matchAll(/<path\b[^>]*?\bd\s*=\s*["']([^"']+)["']/gi)]
+		const shapes = paths.length ? paths : [{ 1: '' }]
+		for (const match of shapes) {
+			const layer = this.scene.createLayer('editableShape', path.basename(filename, path.extname(filename)))
+			this.scene.setAttr(layer, 'inputPath', String(match[1]))
+			this.scene.setAttr(layer, 'generator.dimensions', dims)
+			ids.push(layer.id)
+		}
+		return ids
+	}
+
 	setGenerator(id: string, attr: string, generatorType: string): void {
 		const layer = this.#require(id)
 		if (attr !== 'generator') fail(`setGenerator supports the 'generator' attribute, got '${attr}'`)

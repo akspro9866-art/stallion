@@ -40,6 +40,13 @@ import {
 	snapshotBatchScript,
 	snapshotScript,
 } from '../cavalry/modules/Introspect.ts'
+import {
+	BATCH_STEP_TYPE,
+	batchStepScript,
+	normalizeBatchStepJob,
+} from '../cavalry/modules/BatchStep.ts'
+import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from '../cavalry/modules/mgRuntime.ts'
+import { mgHelpersPreamble } from '../cavalry/modules/Callbacks.ts'
 
 export const MOCK_VERSION = '0.10.0'
 
@@ -297,15 +304,17 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		scene: 'mock://scene.cv',
 		frame: scene.frame,
 		unSaved: false,
-		capabilities: {
-			receipt: true,
-			renderFrames: true,
-			// Same shape as the live heartbeat: introspection is a `type` on POST /post,
-			// and only the mock additionally answers GET /state, /layers and /frame.
-			introspect: ['state', 'layers', 'snapshot', 'snapshot-batch'],
-			errorEnvelope: 1,
-			mock: true,
-		},
+			capabilities: {
+				receipt: true,
+				renderFrames: true,
+				// Same shape as the live heartbeat: introspection is a `type` on POST /post,
+				// and only the mock additionally answers GET /state, /layers, /frame and the
+				// literal POST /batch-step route.
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE],
+				mgRuntime: true,
+				errorEnvelope: 1,
+				mock: true,
+			},
 		ts: Date.now(),
 	})
 
@@ -451,18 +460,42 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return envelope
 	}
 
+	/**
+	 * Batch-step runs the exact `batchStepScript` source the live bridge hands
+	 * to `api.exec`, through the same vm sandbox — including the vendored `_mg`
+	 * runtime and the `__mgApplyManifest` interpreter, so a `dslManifest` sent
+	 * to the mock behaves like one sent to Cavalry.
+	 */
+	const handleBatchStepPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const normalized = normalizeBatchStepJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(BATCH_STEP_TYPE, normalized.error.code, normalized.error.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		return runIntrospect(batchStepScript(normalized.job, MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME), BATCH_STEP_TYPE, parsed)
+	}
+
 	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
-		const code = typeof parsed.code === 'string' ? parsed.code : ''
+		const rawCode = typeof parsed.code === 'string' ? parsed.code : ''
 		const statePath = typeof parsed.statePath === 'string' && parsed.statePath ? parsed.statePath : null
 		const pathOnly = typeof parsed.path === 'string' && parsed.path
-		if (pathOnly && !code) {
+		if (pathOnly && !rawCode) {
 			const exists = fs.existsSync(pathOnly)
 			return { type: RESULT_TYPE, kind: 'result', seq, ok: exists, ...(exists ? { note: 'file script executed (no captured result)' } : { error: `No script found at ${pathOnly}` }) }
 		}
-		if (!code) {
+		if (!rawCode) {
 			return { type: RESULT_TYPE, kind: 'result', seq, ok: false, error: 'Missing/empty `code` or `path` key in request' }
 		}
+		// helpers:true gets the identical preamble the live bridge injects, so a
+		// compact `_mg` script behaves the same on both surfaces.
+		const code =
+			parsed.helpers === true && !rawCode.includes('const _mg')
+				? `${mgHelpersPreamble(MG_HELPERS_SOURCE)}\n${rawCode}`
+				: rawCode
 		const beatFrames = Array.isArray(parsed.beatFrames) ? parsed.beatFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f)) : []
 		const ran = executeOnMock(code, api, { verbose: options.verbose })
 		const receiptIds = [
@@ -525,10 +558,44 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			}
 			if (request.method === 'GET' && url.pathname === '/') {
 				const body =
-					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, ' +
+					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, POST /batch-step, ' +
 					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
+				return
+			}
+			// Literal batch-step route: the live bridge multiplexes batch-step as a
+			// `type` on POST /post (Cavalry's WebServer has no router); the mock,
+			// being real Node, also serves the path-shaped form and answers with the
+			// identical envelope. A JSON body is merged over the query string.
+			if (url.pathname === '/batch-step' && (request.method === 'POST' || request.method === 'GET')) {
+				const q = url.searchParams
+				let parsed: Record<string, unknown> = {
+					type: BATCH_STEP_TYPE,
+					seq: q.get('seq') ?? `batch-step-${Date.now()}`,
+				}
+				const framesQuery = q.get('sampleFrames') ?? q.get('frames')
+				if (framesQuery !== null) parsed.sampleFrames = framesQuery.split(',').map((s) => s.trim()).filter(Boolean)
+				const compQuery = q.get('comp') ?? q.get('compId')
+				if (compQuery !== null) parsed.compId = compQuery
+				if (q.get('scale') !== null) parsed.scale = q.get('scale')
+				if (q.get('renderOutputDir') !== null) parsed.renderOutputDir = q.get('renderOutputDir')
+				if (/^(1|true|yes)$/i.test(q.get('renderFrames') ?? '')) parsed.renderFrames = true
+				if (/^(0|false|no)$/i.test(q.get('dirtyAttributesOnly') ?? '')) parsed.dirtyAttributesOnly = false
+				if (request.method === 'POST') {
+					try {
+						const raw = await readBody(request)
+						if (raw.trim()) parsed = { ...parsed, ...(JSON.parse(raw) as Record<string, unknown>), type: BATCH_STEP_TYPE }
+					} catch (err) {
+						const message = String((err as Error)?.message ?? err)
+						const status = /too large/i.test(message) ? 413 : 400
+						serveJson(response, errorEnvelope(BATCH_STEP_TYPE, ERROR_CODES.BAD_REQUEST, message), status)
+						return
+					}
+				}
+				const envelope = handleBatchStepPost(parsed)
+				lastPayload = envelope
+				serveJson(response, envelope)
 				return
 			}
 			if (request.method === 'GET' && url.pathname === '/get') {
@@ -662,6 +729,9 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					} else if (parsed.type === SNAPSHOT_BATCH_TYPE) {
 						envelope = handleSnapshotBatchPost(parsed)
 						applyBatchInline(envelope, parsed, url)
+						lastPayload = envelope
+					} else if (parsed.type === BATCH_STEP_TYPE) {
+						envelope = handleBatchStepPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)

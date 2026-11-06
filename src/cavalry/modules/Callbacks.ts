@@ -32,6 +32,12 @@
 
 import { RECEIPT_RUNTIME } from './Receipt.ts'
 import {
+	BATCH_STEP_TYPE,
+	batchStepScript,
+	normalizeBatchStepJob,
+} from './BatchStep.ts'
+import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from './mgRuntime.ts'
+import {
 	ERROR_CODES,
 	LAYERS_TYPE,
 	SNAPSHOT_BATCH_TYPE,
@@ -90,6 +96,12 @@ interface PostPayload {
 	fileName?: unknown
 	/** Names the `_mg.*` helper that built this payload, echoed into error envelopes. */
 	mgCall?: unknown
+	/**
+	 * Script posts may set helpers:true to have the preloaded `_mg`/`_rb`
+	 * runtime defined in the script's scope — the caller then sends compact
+	 * `_mg` calls without carrying the helper library on every request.
+	 */
+	helpers?: unknown
 }
 
 /** Run fn, returning null on any throw — bridge code must never die on reads. */
@@ -160,7 +172,10 @@ export class Callbacks {
 				renderFrames: true,
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
-				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch'],
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE],
+				// `_mg`/`_rb` + the declarative manifest interpreter are preloaded at
+				// startup, so batch-step and helpers:true scripts carry no runtime bytes.
+				mgRuntime: true,
 				errorEnvelope: 1,
 				mock: false,
 			},
@@ -214,6 +229,12 @@ export class Callbacks {
 			return
 		}
 
+		// Atomic execute + step + measure + render round trip (see BatchStep.ts).
+		if (parsed.type === BATCH_STEP_TYPE) {
+			this.#handleBatchStep(parsed)
+			return
+		}
+
 		// Readback: scene-graph state, layer hierarchy, single-frame snapshot.
 		// These ride the same /post queue as `script` because Cavalry's WebServer
 		// exposes no other path — see Introspect.ts for why.
@@ -263,9 +284,13 @@ export class Callbacks {
 				return
 			}
 			if (code) {
+				const body =
+					parsed.helpers === true && !code.includes('const _mg')
+						? `${mgHelpersPreamble(MG_HELPERS_SOURCE)}\n${code}`
+						: code
 				const success = api.exec(
 					SCRIPT_ID,
-					this.#wrapped(code, seq, statePath, {
+					this.#wrapped(body, seq, statePath, {
 						beatFrames: parsed.beatFrames,
 						diagnostics: parsed.diagnostics === true,
 					}),
@@ -726,6 +751,70 @@ __deliver(__json);
 		}
 		console.log('Stallion: render-frames batch executed')
 	}
+
+	/**
+	 * Atomic batch-step: execute the script/manifest, sample the requested
+	 * frames, render optional PNGs and report the compact DOM — all in one
+	 * `api.exec` call (see BatchStep.ts). Runs through `#wrapped` WITHOUT the
+	 * atomic marker so the whole batch is one Undo group and the created-layer
+	 * telemetry covers the manifest's layers; `sampleFrames` double as the
+	 * receipt's beatFrames.
+	 */
+	#handleBatchStep = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const normalized = normalizeBatchStepJob(parsed as Record<string, unknown>)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(BATCH_STEP_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))
+			console.error(`Stallion: batch-step rejected — ${normalized.error.error}`)
+			return
+		}
+		const job = normalized.job
+		const success = api.exec(
+			SCRIPT_ID,
+			this.#wrapped(batchStepScript(job, MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME), seq, undefined, {
+				beatFrames: job.frames,
+				diagnostics: true,
+			}),
+		)
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: BATCH_STEP_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(BATCH_STEP_TYPE, ERROR_CODES.EXEC_FAILED, 'Batch-step script failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: batch-step script failed to execute')
+			return
+		}
+		console.log('Stallion: batch-step executed')
+	}
+}
+
+/**
+ * Preamble for `helpers: true` script posts: define `_mg`/`_rb` in the
+ * script's scope from the startup preload when it exists in this context, or
+ * from the vendored source when it does not. The user body then runs with
+ * `_mg` bound as a parameter-shaped local, so compact `_mg` calls arrive
+ * without the helper library travelling over HTTP on every request.
+ *
+ * Only `globalThis._mg` is checked here (never a bare `_mg`): the `var _mg`
+ * below hoists to the script scope and would shadow a global binding of the
+ * same name inside any `typeof _mg` check. Exported because the mock bridge
+ * must inject the identical preamble (mock-server.test.mjs pins both paths to
+ * the same wire contract).
+ */
+export function mgHelpersPreamble(mgRuntimeSource: string): string {
+	return `var __mgEnv = (function () {
+	var __g = typeof globalThis !== 'undefined' ? globalThis : this;
+	try {
+		if (__g._mg && typeof __g._mg.shape === 'function') return { mg: __g._mg, rb: __g._rb || null };
+	} catch (e) {}
+	${mgRuntimeSource}
+	try { __g._mg = _mg; __g._rb = _rb; } catch (e) {}
+	return { mg: _mg, rb: _rb };
+})();
+var _mg = __mgEnv.mg;
+var _rb = __mgEnv.rb;`
 }
 
 interface RenderFramesJob {
