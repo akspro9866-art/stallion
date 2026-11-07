@@ -96,13 +96,14 @@ export const ERROR_CODES = {
 	NO_COMP: 'STALLION_NO_ACTIVE_COMP',
 	NO_FRAME: 'STALLION_NO_FRAME',
 	BAD_LAYER: 'STALLION_UNKNOWN_LAYER',
+	UNKNOWN_SNAPSHOT: 'STALLION_UNKNOWN_SNAPSHOT',
 	RENDER_FAILED: 'STALLION_RENDER_FAILED',
 	UNAUTHORISED: 'STALLION_UNAUTHORISED',
 } as const
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]
 
-export interface ErrorEnvelope {
+export interface ErrorEnvelope extends Record<string, unknown> {
 	ok: false
 	kind: string
 	seq?: unknown

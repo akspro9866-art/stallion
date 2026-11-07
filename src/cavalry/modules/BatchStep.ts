@@ -58,7 +58,7 @@ export interface BatchStepJob {
 }
 
 export interface BatchStepError {
-	code: string
+	code: import('./Introspect.ts').ErrorCode
 	error: string
 }
 

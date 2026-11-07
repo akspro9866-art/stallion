@@ -62,7 +62,7 @@ export interface BatchInspectJob {
 }
 
 export interface BatchInspectError {
-	code: string
+	code: import('./Introspect.ts').ErrorCode
 	error: string
 }
 

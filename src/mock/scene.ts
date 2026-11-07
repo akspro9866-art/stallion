@@ -580,6 +580,50 @@ export class MockScene {
 		}
 	}
 
+	// ------------------------------------------------------ scene checkpoint
+
+	/** JSON-safe full-scene snapshot backing the mock saveSceneAs/openScene pair. */
+	checkpointSnapshot(): string {
+		return JSON.stringify({
+			comps: [...this.comps.values()],
+			layers: [...this.layers.values()].map((l) => ({ ...l, attrs: [...l.attrs.entries()], keyframes: [...l.keyframes.entries()] })),
+			connections: this.connections,
+			selection: this.selection,
+			activeCompId: this.activeCompId,
+			frame: this.frame,
+			lastUndo: this.lastUndo,
+			counters: [...this.counters.entries()],
+			compCounter: this.compCounter,
+		})
+	}
+
+	/** Restore a snapshot produced by checkpointSnapshot; unknown shapes throw. */
+	restoreCheckpoint(snapshot: string): void {
+		const data = JSON.parse(snapshot) as {
+			comps: MockComp[]
+			layers: Array<Omit<MockLayer, 'attrs' | 'keyframes'> & { attrs: [string, unknown][]; keyframes: [string, MockKeyframe[]][] }>
+			connections: MockConnection[]
+			selection: string[]
+			activeCompId: string | null
+			frame: number
+			lastUndo: { name: string; createdLayerIds: string[] } | null
+			counters: [string, number][]
+			compCounter: number
+		}
+		if (!Array.isArray(data.comps) || !Array.isArray(data.layers)) throw new Error('invalid scene checkpoint')
+		this.comps = new Map(data.comps.map((c) => [c.id, c]))
+		this.layers = new Map(data.layers.map((l) => [l.id, { ...l, attrs: new Map(l.attrs), keyframes: new Map(l.keyframes) }]))
+		this.connections = data.connections
+		this.selection = data.selection
+		this.activeCompId = data.activeCompId
+		this.frame = data.frame
+		this.lastUndo = data.lastUndo
+		this.counters = new Map(data.counters)
+		this.compCounter = data.compCounter
+		this.undoDepth = 0
+		this.undoCreated = []
+	}
+
 	// ---------------------------------------------------------------- state
 
 	/** Canonical digest input: node ids+types+keyframe counts, then connections. */

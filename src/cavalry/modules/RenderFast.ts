@@ -32,7 +32,7 @@ export interface RenderFrameFastJob {
 }
 
 export interface RenderFrameFastError {
-	code: string
+	code: import('./Introspect.ts').ErrorCode
 	error: string
 }
 

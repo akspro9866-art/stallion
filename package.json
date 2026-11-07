@@ -47,7 +47,12 @@
     "vscode:prepublish": "cross-env NODE_ENV=production npm run build",
     "publish": "npx @vscode/vsce publish",
     "pretest": "cross-env NODE_ENV=production npm run build",
-    "test": "npm run lint && node test/protocol/bridge-protocol.mjs && node test/run.mjs",
+    "test": "npm run lint && npm run test:protocol && npm run test:mock",
+    "test:protocol": "node test/protocol/bridge-protocol.mjs && node --test test/protocol/batch-eval-and-capture.test.mjs test/protocol/batch-checkpoint-rollback.test.mjs",
+    "test:mock": "node test/run.mjs",
+    "test:ci": "cross-env NODE_ENV=production npm run build && npm run typecheck && npm run lint && npm run test:protocol && npm run test:mock",
+    "test:live": "node scripts/live-preflight.mjs",
+    "typecheck": "tsc --noEmit",
     "test:vscode": "node ./test/vscode/runTest.js",
     "lint": "eslint ."
   },

@@ -16,6 +16,7 @@ import {
 	type MockLayer,
 } from './scene.ts'
 import { isConnectableAttribute, isKnownAttribute } from './schema.ts'
+import { encodePng } from './raster.ts'
 
 export interface MockFrameBuffer {
 	frame: number
@@ -38,6 +39,7 @@ export class MockApi {
 	scene: MockScene
 	options: MockApiOptions
 	lastFrames: MockFrameBuffer[] = []
+	#sceneFilePath: string | null = null
 
 	constructor(scene: MockScene, options: MockApiOptions = {}) {
 		this.scene = scene
@@ -472,10 +474,10 @@ export class MockApi {
 		if (basePath) {
 			const file = /\.[A-Za-z0-9]+$/.test(basePath) ? basePath : `${basePath}.png`
 			fs.mkdirSync(path.dirname(file), { recursive: true })
-			// The live bridge writes real PNGs; the mock keeps a raw RGBA sidecar
-			// with the same name so tests can read pixels without a decoder.
+			// A path-only batch must name a real PNG, not a text placeholder.
+			// Retain the sidecar for existing pixel tests and inline readbacks.
 			fs.writeFileSync(`${file}.rgba`, rgba)
-			fs.writeFileSync(file, `MOCK-PNG frame=${this.scene.frame} ${width}x${height}\n`)
+			fs.writeFileSync(file, encodePng(rgba, width, height))
 		}
 		return true
 	}
@@ -528,7 +530,7 @@ export class MockApi {
 	}
 
 	getSceneFilePath(): string {
-		return 'mock://scene.cv'
+		return this.#sceneFilePath ?? 'mock://scene.cv'
 	}
 
 	getCavalryVersion(): string {
@@ -539,8 +541,37 @@ export class MockApi {
 		return false
 	}
 
-	saveSceneAs(filePath: string): void {
-		this.scene.warn(`saveSceneAs: mock scene saved to ${filePath} (no real file)`)
+	/**
+	 * Real file-backed checkpoint emulation: writes a full-scene snapshot,
+	 * refuses overwrite (like the legacy FILE_EXISTS guard), and re-associates
+	 * the session path the way Cavalry's saveSceneAs may. Returns true only
+	 * when the file actually landed.
+	 */
+	saveSceneAs(filePath: string): boolean {
+		const file = this.#sandboxPath(filePath)
+		if (fs.existsSync(file)) return false
+		fs.mkdirSync(path.dirname(file), { recursive: true })
+		fs.writeFileSync(file, this.scene.checkpointSnapshot())
+		this.#sceneFilePath = file
+		return true
+	}
+
+	/** Restore a checkpoint written by saveSceneAs; missing/invalid files return false. */
+	openScene(filePath: string, _discardUnsaved?: boolean): boolean {
+		const file = this.#sandboxPath(filePath)
+		let snapshot: string
+		try {
+			snapshot = fs.readFileSync(file, 'utf8')
+		} catch {
+			return false
+		}
+		try {
+			this.scene.restoreCheckpoint(snapshot)
+		} catch {
+			return false
+		}
+		this.#sceneFilePath = file
+		return true
 	}
 
 	// ------------------------------------------------------------------ misc

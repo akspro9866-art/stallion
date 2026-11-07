@@ -20,7 +20,7 @@ function collect(directory) {
 	return found
 }
 
-const files = collect(testDir).sort()
+const files = collect(path.join(testDir, 'mock')).sort()
 
 if (files.length === 0) {
 	console.error('no *.test.mjs files found')

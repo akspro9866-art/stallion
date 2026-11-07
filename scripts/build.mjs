@@ -58,7 +58,7 @@ const vscode = await context(vscodeOptions)
 const mock = await context(mockOptions)
 
 if (production) {
-    rimraf(resolve(options.outdir))
+    await rimraf(resolve(options.outdir))
     await Promise.all([build(cavalryOptions), build(vscodeOptions), build(mockOptions)])
     await Promise.all([cavalry.dispose(), vscode.dispose(), mock.dispose()])
 } else {

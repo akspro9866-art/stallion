@@ -62,6 +62,12 @@ import {
 import { RENDER_FRAME_FAST_TYPE, normalizeRenderFrameFastJob, renderFrameFastScript } from '../cavalry/modules/RenderFast.ts'
 import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from '../cavalry/modules/mgRuntime.ts'
 import { mgHelpersPreamble } from '../cavalry/modules/Callbacks.ts'
+import {
+	BATCH_EVAL_AND_CAPTURE_TYPE,
+	batchCaptureFailure,
+	batchEvalAndCaptureScript,
+	normalizeBatchEvalAndCaptureJob,
+} from '../cavalry/modules/BatchEvalAndCapture.ts'
 
 export const MOCK_VERSION = '0.11.0'
 
@@ -239,6 +245,8 @@ export function executeOnMock(
 			// state — including `globalThis._mg` from the startup preload —
 			// survives between calls, exactly like a live shared script context.
 			const ctx = options.context as unknown as Record<string, unknown>
+			ctx.__result = undefined
+			ctx.__stallionState = undefined
 			ctx.__stallionRunConsole = sandboxConsole
 			result = vm.runInContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, options.context, {
 				timeout: 30_000,
@@ -264,7 +272,7 @@ export function executeOnMock(
 		const box = api.scene.boundingBox(id)
 		if (box) boundingBoxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, centre: box.centre }
 	}
-	const state = {
+	const state: Record<string, unknown> = {
 		seq: null,
 		status: error ? 'error' : 'ok',
 		errorStack: stack,
@@ -365,12 +373,16 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		kind: 'status',
 		stallion: `${MOCK_VERSION}-mock`,
 		cavalry: '2.8.0-mock',
-		scene: 'mock://scene.cv',
+		scene: api.getSceneFilePath(),
 		frame: scene.frame,
-		unSaved: false,
+		unSaved: api.sceneHasUnsavedChanges(),
 				capabilities: {
 					receipt: true,
 					renderFrames: true,
+					batchEvalAndCapture: true,
+					batchEvalAndCaptureRollback: false,
+					batchEvalAndCaptureCheckpoint: ['saveSceneAs', 'openScene', 'getSceneFilePath', 'sceneHasUnsavedChanges', 'filePathExists', 'getFileSize']
+						.every((key) => typeof (api as unknown as Record<string, unknown>)[key] === 'function'),
 					// Same shape as the live heartbeat: introspection is a `type` on POST /post,
 					// and only the mock additionally answers GET /state, /layers, /frame and the
 					// literal POST /batch-step route.
@@ -530,6 +542,16 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 	 * runtime and the `__mgApplyManifest` interpreter, so a `dslManifest` sent
 	 * to the mock behaves like one sent to Cavalry.
 	 */
+	const handleBatchEvalAndCapturePost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const normalized = normalizeBatchEvalAndCaptureJob(parsed)
+		if ('error' in normalized) return { ...normalized.error }
+		const ran = executeOnMock(batchEvalAndCaptureScript(normalized.job), api, {
+			verbose: options.verbose, context: persistentContext ?? undefined,
+		})
+		if (ran.error !== null) return { ...batchCaptureFailure(parsed, ran.error) }
+		return ran.result as Record<string, unknown>
+	}
+
 	const handleBatchStepPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
 		const normalized = normalizeBatchStepJob(parsed)
@@ -825,9 +847,9 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			// returns. A JSON body is merged over the query string (body wins), and unlike
 			// POST /post these reply directly rather than ack-then-poll: a path-shaped
 			// request has no queue contract to honour.
-			const introspectPath =
+			const introspectPath: 'state' | 'layers' | 'snapshot' | 'snapshot-batch' | null =
 				url.pathname === '/state' || url.pathname === '/layers'
-					? url.pathname.slice(1)
+					? (url.pathname === '/state' ? 'state' : 'layers')
 					: url.pathname === '/snapshot-batch'
 						? 'snapshot-batch'
 						: url.pathname === '/frame' || url.pathname === '/snapshot'
@@ -932,8 +954,12 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					let envelope: Record<string, unknown>
 					if (parsed.type === RESULT_TYPE) {
 						// internal loopback channel — serve verbatim, like the live bridge
-						lastPayload = parsed
+						const canonical = parsed.batchEvalAndCaptureResult as Record<string, unknown> | undefined
+						lastPayload = canonical?.kind === BATCH_EVAL_AND_CAPTURE_TYPE ? canonical : parsed
 						envelope = { ok: true }
+					} else if (parsed.type === BATCH_EVAL_AND_CAPTURE_TYPE) {
+						envelope = handleBatchEvalAndCapturePost(parsed)
+						lastPayload = envelope
 					} else if (parsed.type === RENDER_FRAMES_TYPE) {
 						envelope = await handleRenderFrames(parsed)
 						lastPayload = envelope

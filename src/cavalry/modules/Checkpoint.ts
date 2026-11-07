@@ -79,7 +79,7 @@ export interface CheckpointStateDoc {
 }
 
 export interface CheckpointError {
-	code: string
+	code: import('./Introspect.ts').ErrorCode
 	error: string
 }
 

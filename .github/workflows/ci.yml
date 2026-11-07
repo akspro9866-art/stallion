@@ -27,7 +27,6 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run build
-        env:
-          NODE_ENV: production
-      - run: npm test
+      - run: npm run test:ci
+      # No live suite exists yet. test:live deliberately fails preflight; do not
+      # advertise a self-hosted workflow that merely reruns these mock tests.

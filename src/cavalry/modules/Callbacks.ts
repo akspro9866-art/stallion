@@ -32,6 +32,13 @@
 
 import { RECEIPT_RUNTIME } from './Receipt.ts'
 import {
+	BATCH_EVAL_AND_CAPTURE_TYPE,
+	batchCaptureFailure,
+	batchEvalAndCaptureScript,
+	normalizeBatchEvalAndCaptureJob,
+	type BatchEvalAndCaptureResponse,
+} from './BatchEvalAndCapture.ts'
+import {
 	BATCH_STEP_TYPE,
 	batchStepScript,
 	normalizeBatchStepJob,
@@ -84,6 +91,7 @@ export interface StallionConfig {
 }
 
 interface PostPayload {
+	batchEvalAndCaptureResult?: BatchEvalAndCaptureResponse
 	type?: string
 	code?: string
 	path?: string
@@ -133,6 +141,48 @@ function safe<T>(fn: () => T): T | null {
 	} catch {
 		return null
 	}
+}
+
+/**
+ * Canonical `kind` values that introspection scripts return *inside* the
+ * wrapped `result` document. `#wrapped` always labels its own envelope
+ * `kind: "result"`; the readback/snapshot/batch handlers promote the inner
+ * document to the top level for GET /get (see `#serveReshaped`).
+ */
+const CANONICAL_RESULT_KINDS = new Set<string>([
+	'state',
+	'layers',
+	'snapshot',
+	'snapshot-batch',
+	'batch-step',
+	'batch_inspect',
+	'checkpoint',
+	'rollback',
+	'render_frame_fast',
+])
+
+/**
+ * Apply `#serveReshaped`'s promotion to a queued loopback envelope.
+ *
+ * Live hosts deliver every wrapped script on TWO channels: the shared-context
+ * stash (consumed synchronously by `#serveReshaped`) and a loopback
+ * `__stallion_result__` POST that `onPost` drains a tick later. Without this
+ * reshape the loopback overwrites the canonical envelope with the raw
+ * wrapper, so a client that asked for `kind: "state"` receives
+ * `kind: "result"` — the mock never sees it because it serves introspection
+ * directly. The seq guard keeps stale stashes and user scripts that happen to
+ * return a lookalike document from being promoted.
+ */
+function reshapeWrappedResult(doc: Record<string, unknown>): Record<string, unknown> | null {
+	const inner =
+		typeof doc.result === 'object' && doc.result !== null && !Array.isArray(doc.result)
+			? (doc.result as Record<string, unknown>)
+			: null
+	if (!inner) return null
+	const kind = typeof inner.kind === 'string' ? inner.kind : ''
+	if (!CANONICAL_RESULT_KINDS.has(kind)) return null
+	if ((inner.seq ?? null) !== (doc.seq ?? null)) return null
+	return { ...inner, seq: doc.seq, kind, ok: doc.ok === true && inner.ok !== false }
 }
 
 export class Callbacks {
@@ -194,6 +244,13 @@ export class Callbacks {
 			capabilities: {
 				receipt: true,
 				renderFrames: true,
+				batchEvalAndCapture: true,
+				batchEvalAndCaptureRollback: typeof (api as unknown as { undo?: unknown }).undo === 'function',
+				// Full-scene save/openScene isolation for hosts without api.undo.
+				// Presence-only evidence; the strict client still proves a real
+				// save/restore round trip before any convergence mutation.
+				batchEvalAndCaptureCheckpoint: ['saveSceneAs', 'openScene', 'getSceneFilePath', 'sceneHasUnsavedChanges', 'filePathExists', 'getFileSize']
+					.every((key) => typeof (api as unknown as Record<string, unknown>)[key] === 'function'),
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
 				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
@@ -243,7 +300,23 @@ export class Callbacks {
 
 		// Internal channel: a finished script reporting its result.
 		if (parsed.type === RESULT_TYPE) {
-			this.#serve(post.result)
+			// New batches carry an already canonical document. Never re-wrap it:
+			// the queued loopback must match the shared-context stash byte-for-byte.
+			if (parsed.batchEvalAndCaptureResult?.kind === BATCH_EVAL_AND_CAPTURE_TYPE) {
+				this.#serve(parsed.batchEvalAndCaptureResult)
+				return
+			}
+			// Introspection scripts return their canonical document as the wrapped
+			// expression value. Promote it exactly like #serveReshaped does, or this
+			// later-served loopback would replace the canonical envelope with
+			// kind:"result" and every correlated introspection read would miss.
+			const reshaped = reshapeWrappedResult(parsed as unknown as Record<string, unknown>)
+			this.#serve(reshaped ?? post.result)
+			return
+		}
+
+		if (parsed.type === BATCH_EVAL_AND_CAPTURE_TYPE) {
+			this.#handleBatchEvalAndCapture(parsed)
 			return
 		}
 
@@ -563,6 +636,10 @@ export class Callbacks {
 })();`
 				: ''
 		return `(function () {
+// seq is caller-controlled and may be reused; telemetry must be per invocation.
+try { globalThis.__stallionState = undefined; } catch (e) {}
+var __apiSetDescriptor = Object.getOwnPropertyDescriptor(api, 'set');
+var __apiConnectDescriptor = Object.getOwnPropertyDescriptor(api, 'connect');
 var __deliver = function (payload) {
 	try { globalThis.${RESULT_STASH} = payload; } catch (e) {}
 	try {
@@ -620,6 +697,8 @@ try {
 	if (__state) { __state.status = 'error'; __state.errorStack = String(err.stack || err); }
 } finally {
 	try { __consoleRestore(); } catch (e) {}
+	try { if (__apiSetDescriptor) Object.defineProperty(api, 'set', __apiSetDescriptor); else delete api.set; } catch (e) {}
+	try { if (__apiConnectDescriptor) Object.defineProperty(api, 'connect', __apiConnectDescriptor); else delete api.connect; } catch (e) {}
 }
 ${telemetryFinish}
 if (__state) {
@@ -800,6 +879,27 @@ __deliver(__json);
 	 * telemetry covers the manifest's layers; `sampleFrames` double as the
 	 * receipt's beatFrames.
 	 */
+	#handleBatchEvalAndCapture = (parsed: PostPayload): void => {
+		const request = parsed as unknown as Record<string, unknown>
+		const normalized = normalizeBatchEvalAndCaptureJob(request)
+		if ('error' in normalized) {
+			this.#serve(normalized.error)
+			return
+		}
+		const job = normalized.job
+		// A reused/omitted seq must never match the previous transaction's stash.
+		delete (globalThis as unknown as Record<string, unknown>)[RESULT_STASH]
+		try {
+			const success = api.exec(SCRIPT_ID, batchEvalAndCaptureScript(job, {
+				origin: `http://${this.#config.host}:${this.#config.port}`, token: this.#config.token,
+			}))
+			if (!success) this.#serve(batchCaptureFailure(request, 'Batch script failed to execute in the Cavalry script host.'))
+			else this.#serveStashed(job.seq)
+		} catch (err) {
+			this.#serve(batchCaptureFailure(request, String(err)))
+		}
+	}
+
 	#handleBatchStep = (parsed: PostPayload): void => {
 		const seq = parsed.seq
 		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
@@ -962,7 +1062,7 @@ __deliver(__json);
 		const success = api.exec(SCRIPT_ID, this.#wrapped(renderFrameFastScript(job), seq))
 		this.#serveReshaped(seq, (doc) => {
 			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
-			const envelope = { ...inner, seq: doc.seq, kind: RENDER_FRAME_FAST_TYPE, ok: doc.ok === true && inner.ok !== false }
+			const envelope: Record<string, unknown> = { ...inner, seq: doc.seq, kind: RENDER_FRAME_FAST_TYPE, ok: doc.ok === true && inner.ok !== false }
 			if (envelope.ok === true && job.inline && typeof envelope.file === 'string') {
 				envelope.inline = false
 				envelope.inlineNote =
