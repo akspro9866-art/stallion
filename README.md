@@ -790,7 +790,7 @@ npm run lint                 # ESLint
 `npm test` runs `eslint .`, then `node test/protocol/bridge-protocol.mjs` (nine protocol scenarios
 against the built `dist/Stallion.js` in a sandboxed `api`/`ui`/`cavalry` realm), then
 `node test/run.mjs`, which recursively collects every `*.test.mjs` under `test/` and runs it with
-Node's test runner: **25 tests** covering readback, snapshots, batch rendering, receipts, expression
+Node's test runner: **44 tests** covering readback, snapshots, batch rendering, receipts, expression
 dispatch, `seq` matching and token auth.
 
 CI runs on `ubuntu-latest` and `windows-latest` across Node 20, 22 and 24. It performs a production
