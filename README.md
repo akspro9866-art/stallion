@@ -109,7 +109,9 @@ The VS Code extension installs it automatically on activation: it copies `dist/S
 `<home>/Library/Application Support/Cavalry/Scripts/Stallion.js` on macOS, and skips the copy when
 the installed file already carries the same version banner.
 
-Without VS Code, copy `dist/Stallion.js` into that same `Cavalry/Scripts` folder yourself.
+Without VS Code, run `npm run deploy` — it builds the production bundle and copies
+`dist/Stallion.js` into that same `Cavalry/Scripts` folder (printing the deployed path,
+byte size and SHA-256), or copy the file yourself.
 
 ### 3. Start the bridge
 
@@ -225,7 +227,7 @@ read from VS Code settings. These settings are not contributed in the extension 
 them in `settings.json` when the Cavalry-side port changes. The extension does not read
 `stallion.json`; it only sends HTTP requests.
 
-## Bridge protocol (v0.10)
+## Bridge protocol (v0.11)
 
 Cavalry's `api.WebServer` exposes exactly two endpoints and one latest-response slot:
 
@@ -267,6 +269,12 @@ multiplexed by `type` and matched by `seq`.
 | `offset`, `limit` | number | readback | Pagination over the layer list. |
 | `budgetMs` | number | readback | Wall-clock ceiling for one slice (5–5000 ms). |
 | `includeHidden` | boolean | snapshot-batch | Include hidden layers in the returned layer entries. |
+| `layerIds` | string[] | batch_inspect | Layers to measure; defaults to all layers, capped at 200. |
+| `attributes` | string[] | batch_inspect | Attribute paths to include per layer (default `position.x/y`, `scale.x/y`, `rotation`, `opacity`; capped at 16). |
+| `snapshotId` | string | checkpoint, rollback | Caller-chosen checkpoint name; unsafe characters are replaced, capped at 80. The rollback resolves state from the in-memory map first, then from the temp-file copy this name determines. |
+| `state` | object | rollback | Inline version-1 checkpoint document (as `checkpoint` returned). Takes precedence over `snapshotId`. |
+| `scaleFactor` | number | render_frame_fast | Downscale in 0.1–1; applied as the `renderPNGFrame` percentage (`scale` wins when both are given). |
+| `inline` | boolean | render_frame_fast | Ask for `pngBase64`. The mock honours it; the live bridge reports `inline: false` plus a note (the script host has no binary read). |
 | `format` | string | render-frames | `png_buffer` (default) or `raw_rgba`. |
 | `mgCall` | string | readback, snapshots | Names the `_mg.*` helper that produced the request; echoed in error envelopes. |
 
@@ -282,6 +290,10 @@ multiplexed by `type` and matched by `seq`.
 | `snapshot` | Render one frame and report the file, size, timing and scene digest. |
 | `snapshot-batch` | Render up to 64 frames in one host call, with per-frame layers and boxes. |
 | `render-frames` | Render up to 2000 frames at verification resolution in one call. |
+| `batch_inspect` | Geometry-only multi-frame readback: scrub the playhead across up to 64 frames, return each layer's world-space box (`{x, y, w, h, cx, cy}`) plus requested attributes as one compact timeline matrix, restore the playhead. No pixels — this is the endpoint a refinement loop polls. |
+| `checkpoint` | Serialize the managed layers' attribute/keyframe/connection state under a `snapshotId`. The state is kept in memory on the bridge and written to a fast temp copy (`<temp>/stallion-checkpoint-<id>.cv`). |
+| `rollback` | Restore a checkpoint in one host call: delete post-checkpoint layers, re-create deleted ones, re-apply values/keyframes/timing/parenting, restore the playhead. |
+| `render_frame_fast` | Render one frame at a `scaleFactor` downscale to the OS temp directory (default) with the same in-call verification fields as `snapshot`. |
 | `__stallion_result__` | Internal loopback channel. Clients must not send it. |
 
 Requests missing `type`, or missing both `code` and `path`, are logged to Cavalry's console and do
@@ -315,7 +327,43 @@ Every handled request replaces the payload served by `GET /get`. A script result
   because Cavalry's `ui.runFileScript` does not return a value.
 - Expression posts report `applied` and `skipped` lists instead of a single result.
 - Readback and capture types reshape their inner document to the top level and report their own
-  `kind` (`state`, `layers`, `snapshot`, `snapshot-batch`, `render-frames`).
+  `kind` (`state`, `layers`, `snapshot`, `snapshot-batch`, `render-frames`, `batch_inspect`,
+  `checkpoint`, `rollback`, `render_frame_fast`).
+
+#### `batch_inspect` envelope
+
+```json
+{
+  "ok": true,
+  "kind": "batch_inspect",
+  "seq": "bi-1",
+  "compId": "compNode#1",
+  "compFrameRate": 60,
+  "compResolution": [1920, 1080],
+  "timeline": {
+    "0": { "basicShape#1": { "bbox": { "x": 0, "y": 0, "w": 100, "h": 50, "cx": 50, "cy": 25 }, "attrs": { "position.x": 0 }, "visible": true } }
+  },
+  "restoredFrame": 7
+}
+```
+
+A layer with no measurable box at a frame (not yet in range, deleted, degenerate) is omitted from
+that frame's map; layer ids the host does not know are listed once in `unknownLayerIds`. The mock
+bridge also serves the literal path `POST /batch_inspect` and answers with the identical envelope.
+
+#### `checkpoint` / `rollback` envelope
+
+`checkpoint` returns `snapshotId`, `frame`, `layerCount`, `state` (the version-1 document: per layer
+type/name/parent/in/out/hidden/attrs/animated/keyframes/connections) and `tmpFile`. `rollback`
+returns `restoredFrame`, `deleted` (post-checkpoint layers), `recreated` (`{from, to}` id map),
+`reappliedCount`, `keyframesRestored` and `connectionsRestored`/`connectionsSkipped`. An unknown
+`snapshotId` is a `STALLION_UNKNOWN_SNAPSHOT` error envelope, never a partial restore.
+
+#### `render_frame_fast` envelope
+
+Same verification fields as `snapshot` (`file`, `sizeBytes`, `exists`, `frameHash`, `restoredFrame`)
+plus `scaleFactor`/`scale`. The default output directory is the host temp folder; pass `outDir` to
+override. On the mock, `inline: true` (default) adds `pngBase64`/`width`/`height`/`contentHash`.
 
 ### Client flow
 

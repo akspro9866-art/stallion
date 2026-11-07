@@ -518,6 +518,11 @@ export class MockApi {
 		return this.options.homeFolder ?? path.join(os.tmpdir(), 'stallion-mock-home')
 	}
 
+	/** Cavalry's per-host temp folder; the mock keeps it inside the OS temp dir so `#sandboxPath` passes writes through. */
+	getTempFolder(): string {
+		return path.join(os.tmpdir(), 'stallion-mock-tmp')
+	}
+
 	getAppDataFolder(): string {
 		return path.join(this.getHomeFolder(), 'AppData')
 	}

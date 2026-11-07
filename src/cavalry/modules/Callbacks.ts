@@ -36,6 +36,21 @@ import {
 	batchStepScript,
 	normalizeBatchStepJob,
 } from './BatchStep.ts'
+import {
+	BATCH_INSPECT_TYPE,
+	batchInspectScript,
+	normalizeBatchInspectJob,
+} from './BatchInspect.ts'
+import {
+	CHECKPOINT_TYPE,
+	ROLLBACK_TYPE,
+	checkpointScript,
+	normalizeCheckpointJob,
+	normalizeRollbackJob,
+	rollbackScript,
+	type CheckpointStateDoc,
+} from './Checkpoint.ts'
+import { RENDER_FRAME_FAST_TYPE, normalizeRenderFrameFastJob, renderFrameFastScript } from './RenderFast.ts'
 import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from './mgRuntime.ts'
 import {
 	ERROR_CODES,
@@ -55,7 +70,7 @@ import {
 	type SnapshotJob,
 } from './Introspect.ts'
 
-export const VERSION = '0.10.0'
+export const VERSION = '0.11.0'
 
 const SCRIPT_ID = 'io.scenery.stallion'
 const RESULT_TYPE = '__stallion_result__'
@@ -94,6 +109,13 @@ interface PostPayload {
 	budgetMs?: unknown
 	scale?: unknown
 	fileName?: unknown
+	/** batch_inspect / checkpoint / rollback / render_frame_fast payload */
+	layerIds?: unknown
+	includeHidden?: unknown
+	snapshotId?: unknown
+	state?: unknown
+	scaleFactor?: unknown
+	inline?: unknown
 	/** Names the `_mg.*` helper that built this payload, echoed into error envelopes. */
 	mgCall?: unknown
 	/**
@@ -116,6 +138,8 @@ function safe<T>(fn: () => T): T | null {
 export class Callbacks {
 	#server: api.WebServer
 	#config: StallionConfig
+	/** In-memory checkpoint store: snapshotId → captured state (see Checkpoint.ts). */
+	#checkpoints = new Map<string, { capturedAt: number; state: CheckpointStateDoc; tmpFile: string | null }>()
 
 	constructor(server: api.WebServer, config: StallionConfig) {
 		this.#server = server
@@ -172,7 +196,7 @@ export class Callbacks {
 				renderFrames: true,
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
-				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE],
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
 				// `_mg`/`_rb` + the declarative manifest interpreter are preloaded at
 				// startup, so batch-step and helpers:true scripts carry no runtime bytes.
 				mgRuntime: true,
@@ -248,6 +272,22 @@ export class Callbacks {
 		}
 		if (parsed.type === SNAPSHOT_BATCH_TYPE) {
 			this.#handleSnapshotBatch(parsed)
+			return
+		}
+		if (parsed.type === BATCH_INSPECT_TYPE) {
+			this.#handleBatchInspect(parsed)
+			return
+		}
+		if (parsed.type === CHECKPOINT_TYPE) {
+			this.#handleCheckpoint(parsed)
+			return
+		}
+		if (parsed.type === ROLLBACK_TYPE) {
+			this.#handleRollback(parsed)
+			return
+		}
+		if (parsed.type === RENDER_FRAME_FAST_TYPE) {
+			this.#handleRenderFrameFast(parsed)
 			return
 		}
 
@@ -787,6 +827,153 @@ __deliver(__json);
 			return
 		}
 		console.log('Stallion: batch-step executed')
+	}
+
+	/**
+	 * `/batch_inspect` — geometry-only multi-frame readback matrix (see
+	 * BatchInspect.ts). No pixels, one host call, playhead restored once; this
+	 * is the endpoint Stage 4.5's local solver polls while it converges.
+	 */
+	#handleBatchInspect = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const normalized = normalizeBatchInspectJob(parsed as Record<string, unknown>)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(BATCH_INSPECT_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))
+			console.error(`Stallion: batch_inspect rejected — ${normalized.error.error}`)
+			return
+		}
+		const success = api.exec(SCRIPT_ID, this.#wrapped(batchInspectScript(normalized.job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: BATCH_INSPECT_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(BATCH_INSPECT_TYPE, ERROR_CODES.EXEC_FAILED, 'batch_inspect failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: batch_inspect failed to execute')
+		}
+	}
+
+	/**
+	 * `/checkpoint` — serialize the managed layers' state under a snapshotId
+	 * (see Checkpoint.ts). The state lands in two places: the in-memory map
+	 * below (millisecond rollback) and a temp-file copy the script itself
+	 * wrote, so a host restart cannot orphan a snapshotId.
+	 */
+	#handleCheckpoint = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const job = normalizeCheckpointJob(parsed as Record<string, unknown>).job
+		const success = api.exec(SCRIPT_ID, this.#wrapped(checkpointScript(job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			const state = inner.state as CheckpointStateDoc | undefined
+			if (doc.ok !== false && inner.ok !== false && state && typeof state === 'object') {
+				this.#checkpoints.set(job.snapshotId, {
+					capturedAt: Date.now(),
+					state,
+					tmpFile: typeof inner.tmpFile === 'string' ? inner.tmpFile : null,
+				})
+				// Bounded store: a checkpoint is a working-set scratch, not a log.
+				while (this.#checkpoints.size > 32) {
+					const oldest = this.#checkpoints.keys().next().value
+					if (oldest === undefined) break
+					this.#checkpoints.delete(oldest)
+				}
+			}
+			return { ...inner, seq: doc.seq, kind: CHECKPOINT_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(CHECKPOINT_TYPE, ERROR_CODES.EXEC_FAILED, 'checkpoint failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: checkpoint failed to execute')
+		}
+	}
+
+	/**
+	 * `/rollback` — restore a checkpoint by `snapshotId` (in-memory map first,
+	 * then the temp-file copy the checkpoint wrote), or by an inline `state`
+	 * document for callers that kept it themselves. One host call.
+	 */
+	#handleRollback = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		let state = (parsed.state ?? null) as CheckpointStateDoc | null
+		const snapshotId = typeof parsed.snapshotId === 'string' ? parsed.snapshotId.trim() : ''
+		if (!state && snapshotId) {
+			const stored = this.#checkpoints.get(snapshotId)
+			if (stored) {
+				state = stored.state
+			} else {
+				// Temp-file fallback: same deterministic path the checkpoint wrote.
+				const safeId = snapshotId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80)
+				const tmpFile = `${safe(() => String(api.getTempFolder())) ?? ''}/stallion-checkpoint-${safeId}.cv`
+				const raw = safe(() => (tmpFile ? (api.readFromFile(tmpFile) as string) : '')) ?? ''
+				const parsedState = safe(() => JSON.parse(raw)) as CheckpointStateDoc | null
+				if (parsedState && typeof parsedState === 'object' && Array.isArray(parsedState.layers)) state = parsedState
+			}
+		}
+		if (!state) {
+			this.#serve(
+				errorEnvelope(
+					ROLLBACK_TYPE,
+					'STALLION_UNKNOWN_SNAPSHOT',
+					`rollback cannot resolve ${snapshotId ? `snapshotId '${snapshotId}'` : 'the request'}: no in-memory checkpoint, no temp-file copy, and no inline \`state\`.`,
+					{ seq, mgCall },
+				),
+			)
+			console.error('Stallion: rollback rejected — unknown snapshot')
+			return
+		}
+		const normalized = normalizeRollbackJob({ ...(parsed as Record<string, unknown>), state })
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(ROLLBACK_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))
+			console.error(`Stallion: rollback rejected — ${normalized.error.error}`)
+			return
+		}
+		const success = api.exec(SCRIPT_ID, this.#wrapped(rollbackScript(normalized.job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: ROLLBACK_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(ROLLBACK_TYPE, ERROR_CODES.EXEC_FAILED, 'rollback failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: rollback failed to execute')
+		}
+	}
+
+	/**
+	 * `/render_frame_fast` — one downscaled PNG for the verify loop, written to
+	 * the temp directory by default (see RenderFast.ts). The script host has no
+	 * binary read, so the live bridge cannot inline the bytes: an `inline`
+	 * request is acknowledged with the fast local file path plus a note, and
+	 * the mock bridge is the surface that returns `pngBase64`.
+	 */
+	#handleRenderFrameFast = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const tempDir = safe(() => String(api.getTempFolder())) ?? ''
+		const normalized = normalizeRenderFrameFastJob(parsed as Record<string, unknown>, tempDir)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(RENDER_FRAME_FAST_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))
+			console.error(`Stallion: render_frame_fast rejected — ${normalized.error.error}`)
+			return
+		}
+		const job = normalized.job
+		const success = api.exec(SCRIPT_ID, this.#wrapped(renderFrameFastScript(job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			const envelope = { ...inner, seq: doc.seq, kind: RENDER_FRAME_FAST_TYPE, ok: doc.ok === true && inner.ok !== false }
+			if (envelope.ok === true && job.inline && typeof envelope.file === 'string') {
+				envelope.inline = false
+				envelope.inlineNote =
+					'The live script host has no binary read; pngBase64 is unavailable here. The file is a fast local temp path — read it over localhost, or point STALLION_URL at a mock bridge for inline buffers.'
+			}
+			return envelope
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(RENDER_FRAME_FAST_TYPE, ERROR_CODES.EXEC_FAILED, 'render_frame_fast failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: render_frame_fast failed to execute')
+		}
 	}
 }
 

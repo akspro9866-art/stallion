@@ -237,3 +237,31 @@ test('batch-step restores the playhead and reports render failures per frame', a
 		assert.equal(envelope.restoredFrame, 0)
 	})
 })
+
+test('preloaded host: batch-step manifests run through the preload branch without the _mg TDZ', async () => {
+	// A live Cavalry shares one script context where the startup preload has
+	// defined globalThis._mg. In that shape the batch-step manifest interpreter
+	// used to die with "Cannot access '_mg' before initialization" — the mock's
+	// fresh context per call could never reproduce it. preloadMg seeds ONE
+	// persistent context with the preload, so this suite runs the exact branch
+	// the live host runs.
+	await withServer(async (handle) => {
+		const envelope = await batchStep(handle, {
+			dslManifest: {
+				comp: { width: 960, height: 540, fps: 30, endFrame: 90, bg: '#101418' },
+				layers: [{ as: 'probe', kind: 'shape', shape: 'rectangle', attrs: { 'generator.dimensions': [200, 100], position: [10, 20] } }],
+				ops: [{ op: 'set', target: '$probe', attrs: { opacity: 80 } }],
+			},
+			sampleFrames: [0],
+		})
+		assert.equal(envelope.kind, 'batch-step')
+		assert.equal(envelope.ok, true, JSON.stringify(envelope.error))
+		const manifest = envelope.manifestResult ?? {}
+		assert.equal(manifest.ok, true, JSON.stringify(manifest.errors))
+		assert.ok(manifest.created?.probe, `probe alias must map to a created layer: ${JSON.stringify(manifest.created)}`)
+		// The layer really exists in the shared scene and carries the op's write.
+		const readback = await handle.get()
+		assert.equal(readback.kind, 'batch-step')
+		assert.match(envelope.compactDomTsv ?? '', /probe/)
+	}, { preloadMg: true })
+})

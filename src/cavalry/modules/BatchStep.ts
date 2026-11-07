@@ -169,6 +169,15 @@ var __bsStart = Date.now();
 // contexts) the vendored source is evaluated here instead. Either way the
 // helpers are reachable as __mgEnv.mg / __mgEnv.applyManifest, and user code
 // receives them as parameters — no global write is required for this run.
+//
+// The two branches deliberately live in SEPARATE function scopes. The vendored
+// runtime source declares a const _mg binding; if its text sat in this
+// function's own scope, the preload branch would return before that
+// declaration ever ran and the manifest interpreter — which closes over _mg —
+// would then hit a permanently-uninitialized binding: "Cannot access '_mg'
+// before initialization". That was exactly the live-host failure the mock
+// never caught, because the mock's sandbox has no preloaded global _mg and
+// always took the fallback branch.
 var __mgEnv = (function () {
   var pre = null;
   try {
@@ -177,13 +186,20 @@ var __mgEnv = (function () {
     }
   } catch (e) { pre = null; }
   if (pre) {
+    // Preloaded host: bind the names the manifest interpreter expects in this
+    // scope and evaluate only the interpreter. The runtime source below is
+    // never reached on this branch.
+    var _mg = pre.mg;
+    var _rb = pre.rb;
     ${mgManifestRuntime}
-    return { mg: pre.mg, rb: pre.rb, applyManifest: __mgApplyManifest };
+    return { mg: _mg, rb: _rb, applyManifest: __mgApplyManifest };
   }
-  ${mgRuntimeSource}
-  ${mgManifestRuntime}
-  try { __global._mg = _mg; __global._rb = _rb; } catch (e) {}
-  return { mg: _mg, rb: _rb, applyManifest: __mgApplyManifest };
+  return (function () {
+    ${mgRuntimeSource}
+    ${mgManifestRuntime}
+    try { __global._mg = _mg; __global._rb = _rb; } catch (e) {}
+    return { mg: _mg, rb: _rb, applyManifest: __mgApplyManifest };
+  })();
 })();
 
 var __scriptResult = null;

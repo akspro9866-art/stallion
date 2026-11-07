@@ -79,7 +79,17 @@ test('heartbeat advertises introspection and the error envelope', async () => {
 	const handle = await startMockServer({ port: 0 })
 	try {
 		const status = await getJson(handle)
-		assert.deepEqual(status.capabilities.introspect, ['state', 'layers', 'snapshot', 'snapshot-batch', 'batch-step'])
+		assert.deepEqual(status.capabilities.introspect, [
+			'state',
+			'layers',
+			'snapshot',
+			'snapshot-batch',
+			'batch-step',
+			'batch_inspect',
+			'checkpoint',
+			'rollback',
+			'render_frame_fast',
+		])
 		assert.equal(status.capabilities.errorEnvelope, 1)
 		assert.equal(status.capabilities.mock, true)
 	} finally {

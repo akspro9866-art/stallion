@@ -12,6 +12,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Fixed` for any bug fixes
 - `Security` in case of vulnerabilities
 
+## [0.11.0] - 2026-11-07
+
+Fast-loop endpoints for the deterministic refinement pipeline (Stage 4.5).
+
+### Added
+
+- **`batch_inspect`** — single-roundtrip multi-frame readback. Scrubs the
+  playhead across up to 64 requested frames, reads every target layer's
+  world-space bounding box (short form `x/y/w/h/cx/cy`) and requested
+  attribute values, reports `compFrameRate`/`compResolution`, restores the
+  playhead and answers with one compact timeline matrix. No pixels are
+  rendered — geometry-only, so a local solver can poll it without paying the
+  PNG render cost `snapshot-batch` exists for.
+- **`checkpoint` / `rollback`** — fast scene state checkpointing under a
+  caller-chosen `snapshotId`. The checkpoint serializes managed layers'
+  attribute values, keyframes (frame + evaluated value), in/out frames,
+  parenting, hidden flags and incoming connections into a version-1 state
+  document, kept in memory on the bridge (bounded, oldest evicted) and written
+  to a fast temp copy `<temp>/stallion-checkpoint-<id>.cv`. The rollback is one
+  host call: delete post-checkpoint layers, re-create deleted ones, re-apply
+  values/keyframes/timing/parenting, restore connections (best effort) and the
+  playhead. Unknown snapshot ids fail as `STALLION_UNKNOWN_SNAPSHOT`.
+- **`render_frame_fast`** — one downscaled render for the verify loop:
+  `scaleFactor` 0.1–1 (or legacy `scale` percent), default output directory is
+  the host temp folder, same in-call verification fields as `snapshot`
+  (`sizeBytes`, `exists`, `frameHash`, `restoredFrame`). The mock bridge
+  additionally inlines `pngBase64`/`width`/`height`/`contentHash`; the live
+  bridge reports `inline: false` with a note (no binary read in the script
+  host).
+- The mock bridge serves all three as literal paths (`/batch_inspect`,
+  `/checkpoint`, `/rollback`, `/render_frame_fast`) answering the identical
+  envelopes, and the heartbeat `capabilities.introspect` lists every new kind.
+
+### Fixed
+
+- **Live `_mg` TDZ in `/batch-step` manifests**: when the startup preload had
+  defined `globalThis._mg` (every real Cavalry session), the generated script's
+  preload branch returned before the vendored runtime's `const _mg` ever
+  initialized, so the manifest interpreter — which closes over `_mg` — failed
+  every layer creation with "Cannot access '_mg' before initialization". The
+  two bootstrap branches now live in separate function scopes, and a
+  `preloadMg` mock mode (one persistent vm context carrying the preload) keeps
+  the mock executing the exact branch a live shared context takes.
+
+### Added
+
+- **`npm run deploy`** — builds the production bundle and installs it to the
+  Cavalry user Scripts folder (`%APPDATA%\Cavalry\Scripts\Stallion.js` on
+  Windows), verifying the version banner and a byte-identical readback, and
+  printing the deployed path, byte size and SHA-256.
+
+### Notes
+
+- Backward compatible: existing `type`s, envelopes and the `snapshot` PNG kind
+  are unchanged; the new kinds are additive dispatch entries on POST /post.
+
 ## [0.10.0] - 2026-11-01
 
 Telemetry, batch frame verification, and a headless mock bridge for CI.

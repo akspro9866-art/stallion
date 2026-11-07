@@ -45,10 +45,25 @@ import {
 	batchStepScript,
 	normalizeBatchStepJob,
 } from '../cavalry/modules/BatchStep.ts'
+import {
+	BATCH_INSPECT_TYPE,
+	batchInspectScript,
+	normalizeBatchInspectJob,
+} from '../cavalry/modules/BatchInspect.ts'
+import {
+	CHECKPOINT_TYPE,
+	ROLLBACK_TYPE,
+	checkpointScript,
+	normalizeCheckpointJob,
+	normalizeRollbackJob,
+	rollbackScript,
+	type CheckpointStateDoc,
+} from '../cavalry/modules/Checkpoint.ts'
+import { RENDER_FRAME_FAST_TYPE, normalizeRenderFrameFastJob, renderFrameFastScript } from '../cavalry/modules/RenderFast.ts'
 import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from '../cavalry/modules/mgRuntime.ts'
 import { mgHelpersPreamble } from '../cavalry/modules/Callbacks.ts'
 
-export const MOCK_VERSION = '0.10.0'
+export const MOCK_VERSION = '0.11.0'
 
 const RESULT_TYPE = '__stallion_result__'
 const RENDER_FRAMES_TYPE = 'render-frames'
@@ -62,6 +77,14 @@ export interface MockServerOptions {
 	strictSchema?: boolean
 	/** Echo captured console output to stderr (debugging aid, off in CI). */
 	verbose?: boolean
+	/**
+	 * Seed ONE persistent vm context with the `_mg`/`_rb` startup preload —
+	 * the same shared-context shape a live Cavalry presents after `Scripts →
+	 * Stallion`. Every script and batch-step then takes the bridge's preload
+	 * branch (`globalThis._mg` present) instead of re-evaluating the vendored
+	 * runtime per call, which is what keeps mock and live wire-faithful.
+	 */
+	preloadMg?: boolean
 }
 
 export interface MockServerHandle {
@@ -172,7 +195,7 @@ function readBody(request: http.IncomingMessage): Promise<string> {
 export function executeOnMock(
 	code: string,
 	api: MockApi,
-	options: { verbose?: boolean } = {},
+	options: { verbose?: boolean; context?: vm.Context } = {},
 ): { result: unknown; error: string | null; stack: string | null; console: ConsoleEntry[]; state: Record<string, unknown> | null } {
 	const entries: ConsoleEntry[] = []
 	const sandboxConsole = {
@@ -211,9 +234,20 @@ export function executeOnMock(
 	let error: string | null = null
 	let stack: string | null = null
 	try {
-		result = vm.runInNewContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, sandbox, {
-			timeout: 30_000,
-		})
+		if (options.context) {
+			// Persistent preloaded context (preloadMg: true): the sandbox global
+			// state — including `globalThis._mg` from the startup preload —
+			// survives between calls, exactly like a live shared script context.
+			const ctx = options.context as unknown as Record<string, unknown>
+			ctx.__stallionRunConsole = sandboxConsole
+			result = vm.runInContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, options.context, {
+				timeout: 30_000,
+			})
+		} else {
+			result = vm.runInNewContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, sandbox, {
+				timeout: 30_000,
+			})
+		}
 	} catch (err) {
 		const e = err as Error
 		error = String(e?.message ?? e)
@@ -297,6 +331,36 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 	let lastPayload: Record<string, unknown> | null = null
 	const queue: Promise<void> = Promise.resolve()
 
+	// preloadMg: one persistent vm context carrying the `_mg`/`_rb` startup
+	// preload, so scripts and batch-steps run exactly the preload branch a live
+	// shared script context takes (see MockServerOptions.preloadMg).
+	let persistentContext: vm.Context | null = null
+	if (options.preloadMg === true) {
+		const seedConsole = {
+			log: () => {},
+			info: () => {},
+			warn: () => {},
+			error: () => {},
+		}
+		persistentContext = vm.createContext({
+			api,
+			console: seedConsole,
+			__result: undefined,
+			__stallionState: undefined,
+			cavalry: {
+				versionLessThan: () => false,
+				Path: class {
+					d = ''
+					setD(d: string) {
+						this.d = String(d)
+						return this
+					}
+				},
+			},
+		})
+		vm.runInContext(mgHelpersPreamble(MG_HELPERS_SOURCE), persistentContext)
+	}
+
 	const heartbeat = (): Record<string, unknown> => ({
 		kind: 'status',
 		stallion: `${MOCK_VERSION}-mock`,
@@ -304,13 +368,13 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		scene: 'mock://scene.cv',
 		frame: scene.frame,
 		unSaved: false,
-			capabilities: {
-				receipt: true,
-				renderFrames: true,
-				// Same shape as the live heartbeat: introspection is a `type` on POST /post,
-				// and only the mock additionally answers GET /state, /layers, /frame and the
-				// literal POST /batch-step route.
-				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE],
+				capabilities: {
+					receipt: true,
+					renderFrames: true,
+					// Same shape as the live heartbeat: introspection is a `type` on POST /post,
+					// and only the mock additionally answers GET /state, /layers, /frame and the
+					// literal POST /batch-step route.
+					introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
 				mgRuntime: true,
 				errorEnvelope: 1,
 				mock: true,
@@ -401,7 +465,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		parsed: Record<string, unknown>,
 	): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
-		const ran = executeOnMock(source, api, { verbose: options.verbose })
+		const ran = executeOnMock(source, api, { verbose: options.verbose, context: persistentContext ?? undefined })
 		if (ran.error !== null) {
 			return { ...errorEnvelope(kind, ERROR_CODES.EXEC_FAILED, ran.error, { seq, stack: ran.stack ?? undefined }) }
 		}
@@ -478,6 +542,123 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return runIntrospect(batchStepScript(normalized.job, MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME), BATCH_STEP_TYPE, parsed)
 	}
 
+	// In-memory checkpoint store, mirroring the live bridge: snapshotId → state.
+	// The checkpoint script also wrote a temp-file copy, so both surfaces can
+	// restore after a process restart the same way.
+	const checkpoints = new Map<string, { capturedAt: number; state: CheckpointStateDoc; tmpFile: string | null }>()
+
+	/** Resolve a rollback's state document: inline `state`, then memory, then temp file. */
+	const resolveRollbackState = (parsed: Record<string, unknown>): CheckpointStateDoc | null => {
+		const inline = parsed.state
+		if (inline && typeof inline === 'object' && !Array.isArray(inline) && Array.isArray((inline as CheckpointStateDoc).layers)) {
+			return inline as CheckpointStateDoc
+		}
+		const snapshotId = typeof parsed.snapshotId === 'string' ? parsed.snapshotId.trim() : ''
+		if (!snapshotId) return null
+		const stored = checkpoints.get(snapshotId)
+		if (stored) return stored.state
+		const safeId = snapshotId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80)
+		const tmpFile = path.join(api.getTempFolder(), `stallion-checkpoint-${safeId}.cv`)
+		try {
+			const parsedState = JSON.parse(fs.readFileSync(tmpFile, 'utf8')) as CheckpointStateDoc
+			if (parsedState && typeof parsedState === 'object' && Array.isArray(parsedState.layers)) return parsedState
+		} catch {
+			/* unknown snapshotId */
+		}
+		return null
+	}
+
+	const handleBatchInspectPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const normalized = normalizeBatchInspectJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(BATCH_INSPECT_TYPE, normalized.error.code, normalized.error.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		return runIntrospect(batchInspectScript(normalized.job), BATCH_INSPECT_TYPE, parsed)
+	}
+
+	const handleCheckpointPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const job = normalizeCheckpointJob(parsed).job
+		const envelope = runIntrospect(checkpointScript(job), CHECKPOINT_TYPE, parsed)
+		const state = envelope.state as CheckpointStateDoc | undefined
+		if (envelope.ok === true && state && typeof state === 'object') {
+			checkpoints.set(job.snapshotId, {
+				capturedAt: Date.now(),
+				state,
+				tmpFile: typeof envelope.tmpFile === 'string' ? envelope.tmpFile : null,
+			})
+			while (checkpoints.size > 32) {
+				const oldest = checkpoints.keys().next().value
+				if (oldest === undefined) break
+				checkpoints.delete(oldest)
+			}
+		}
+		return envelope
+	}
+
+	const handleRollbackPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const state = resolveRollbackState(parsed)
+		if (!state) {
+			const snapshotId = typeof parsed.snapshotId === 'string' ? parsed.snapshotId.trim() : ''
+			return errorEnvelope(ROLLBACK_TYPE, 'STALLION_UNKNOWN_SNAPSHOT', `rollback cannot resolve ${snapshotId ? `snapshotId '${snapshotId}'` : 'the request'}: no in-memory checkpoint, no temp-file copy, and no inline \`state\`.`, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		const normalized = normalizeRollbackJob({ ...parsed, state })
+		if ('error' in normalized) {
+			return errorEnvelope(ROLLBACK_TYPE, normalized.error.code, normalized.error.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		return runIntrospect(rollbackScript(normalized.job), ROLLBACK_TYPE, parsed)
+	}
+
+	const handleRenderFrameFastPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const normalized = normalizeRenderFrameFastJob(parsed, api.getTempFolder())
+		if ('error' in normalized) {
+			return errorEnvelope(RENDER_FRAME_FAST_TYPE, normalized.error.code, normalized.error.error, {
+				seq: parsed.seq ?? null,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		const envelope = runIntrospect(renderFrameFastScript(normalized.job), RENDER_FRAME_FAST_TYPE, parsed)
+		if (envelope.ok !== true) return envelope
+		// The mock is real Node: hash the artifact and inline the pixels — the
+		// exact contract snapshot serves. The file on disk is the mock's
+		// placeholder; the real pixels live in the `.rgba` sidecar, so the inline
+		// buffer is a true PNG encoded from it (as applyBatchInline does).
+		const file = typeof envelope.file === 'string' ? envelope.file : ''
+		if (!file || !fs.existsSync(file)) return envelope
+		try {
+			envelope.contentHash = createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+			if (normalized.job.inline) {
+				const comp = scene.comps.get(String(envelope.compId ?? '')) ?? scene.activeComp()
+				const width = Math.max(1, Math.round((comp?.width ?? 0) * normalized.job.scaleFactor))
+				const height = Math.max(1, Math.round((comp?.height ?? 0) * normalized.job.scaleFactor))
+				const sidecar = `${file}.rgba`
+				if (comp && fs.existsSync(sidecar)) {
+					const rgba = fs.readFileSync(sidecar)
+					if (rgba.length === width * height * 4) {
+						envelope.pngBase64 = encodePng(rgba, width, height).toString('base64')
+						envelope.width = width
+						envelope.height = height
+					} else {
+						envelope.inlineNote = `sidecar length ${rgba.length} does not match ${width}x${height}x4`
+					}
+				}
+			}
+		} catch {
+			/* sizeBytes remains the verification evidence */
+		}
+		return envelope
+	}
+
 	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
 		const rawCode = typeof parsed.code === 'string' ? parsed.code : ''
@@ -497,7 +678,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				? `${mgHelpersPreamble(MG_HELPERS_SOURCE)}\n${rawCode}`
 				: rawCode
 		const beatFrames = Array.isArray(parsed.beatFrames) ? parsed.beatFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f)) : []
-		const ran = executeOnMock(code, api, { verbose: options.verbose })
+		const ran = executeOnMock(code, api, { verbose: options.verbose, context: persistentContext ?? undefined })
 		const receiptIds = [
 			...new Set([...((ran.state.createdLayerIds as string[]) ?? []), ...((ran.state.activeSelection as string[]) ?? [])]),
 		]
@@ -559,7 +740,8 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			if (request.method === 'GET' && url.pathname === '/') {
 				const body =
 					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, POST /batch-step, ' +
-					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch\n'
+					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch, ' +
+					'/batch_inspect, /checkpoint, /rollback, /render_frame_fast\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
@@ -568,6 +750,41 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			// `type` on POST /post (Cavalry's WebServer has no router); the mock,
 			// being real Node, also serves the path-shaped form and answers with the
 			// identical envelope. A JSON body is merged over the query string.
+			const fastPath =
+				url.pathname === '/batch_inspect'
+					? handleBatchInspectPost
+					: url.pathname === '/checkpoint'
+						? handleCheckpointPost
+						: url.pathname === '/rollback'
+							? handleRollbackPost
+							: url.pathname === '/render_frame_fast'
+								? handleRenderFrameFastPost
+								: null
+			if (fastPath && (request.method === 'POST' || request.method === 'GET')) {
+				let parsed: Record<string, unknown> = { seq: url.searchParams.get('seq') ?? `${url.pathname.slice(1)}-${Date.now()}` }
+				if (url.searchParams.get('comp') !== null) parsed.compId = url.searchParams.get('comp')
+				if (url.searchParams.get('frame') !== null) parsed.frame = url.searchParams.get('frame')
+				if (url.searchParams.get('frames') !== null) parsed.frames = (url.searchParams.get('frames') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+				if (url.searchParams.get('layerIds') !== null) parsed.layerIds = (url.searchParams.get('layerIds') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+				if (url.searchParams.get('attributes') !== null) parsed.attributes = (url.searchParams.get('attributes') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+				if (url.searchParams.get('snapshotId') !== null) parsed.snapshotId = url.searchParams.get('snapshotId')
+				if (url.searchParams.get('scaleFactor') !== null) parsed.scaleFactor = url.searchParams.get('scaleFactor')
+				if (request.method === 'POST') {
+					try {
+						const raw = await readBody(request)
+						if (raw.trim()) parsed = { ...parsed, ...(JSON.parse(raw) as Record<string, unknown>) }
+					} catch (err) {
+						const message = String((err as Error)?.message ?? err)
+						const status = /too large/i.test(message) ? 413 : 400
+						serveJson(response, { ok: false, error: message }, status)
+						return
+					}
+				}
+				const envelope = fastPath(parsed)
+				lastPayload = envelope
+				serveJson(response, envelope)
+				return
+			}
 			if (url.pathname === '/batch-step' && (request.method === 'POST' || request.method === 'GET')) {
 				const q = url.searchParams
 				let parsed: Record<string, unknown> = {
@@ -732,6 +949,18 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === BATCH_STEP_TYPE) {
 						envelope = handleBatchStepPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === BATCH_INSPECT_TYPE) {
+						envelope = handleBatchInspectPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === CHECKPOINT_TYPE) {
+						envelope = handleCheckpointPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === ROLLBACK_TYPE) {
+						envelope = handleRollbackPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === RENDER_FRAME_FAST_TYPE) {
+						envelope = handleRenderFrameFastPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)
