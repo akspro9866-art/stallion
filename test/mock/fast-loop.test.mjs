@@ -4,6 +4,8 @@
  * Covers the three refinement-loop kinds added in v0.11.0:
  *
  *   - `batch_inspect`  — geometry-only multi-frame readback matrix
+ *   - `export_comp_rig_overrides` — procedural/visual knob readback for reverse
+ *     preset sync (spring physics, stagger, palette, font sizes)
  *   - `checkpoint`     — scene state serialization under a snapshotId
  *   - `rollback`       — millisecond restore from memory or the temp-file copy
  *   - `render_frame_fast` — downscaled temp-dir render with inline base64 (mock)
@@ -92,6 +94,45 @@ test('batch_inspect returns the comp matrix over POST /post with the playhead re
 		// The playhead ends where it started.
 		assert.equal(envelope.restoredFrame, 0)
 		assert.equal(handle.scene.frame, 0)
+	})
+})
+
+test('export_comp_rig_overrides returns procedural/visual knobs and keeps geometry out', async () => {
+	await withScene(async (handle, built) => {
+		const rigScript = `
+			var dup = api.create('duplicator', 'items stagger');
+			api.set(dup, { count: 7, staggerOffset: 3 });
+			var label = api.create('textShape', 'headline');
+			api.set(label, { text: 'Quarterly', fontSize: 64, 'material.materialColor': '#FF0044' });
+			var card = ${JSON.stringify(built.card)};
+			api.set(card, { 'material.materialColor': '#112233' });
+			return { dup: dup, label: label, card: card };
+		`
+		const { body: ack } = await postJson(handle, '/post', { type: 'script', seq: 'rig-build', code: rigScript })
+		assert.equal(ack.ok, true)
+		const rig = (await getJson(handle)).result
+		await postJson(handle, '/post', { type: 'export_comp_rig_overrides', seq: 'rig1', layerIds: [rig.dup, rig.label, rig.card] })
+		const envelope = await getJson(handle)
+		assert.equal(envelope.kind, 'export_comp_rig_overrides')
+		assert.equal(envelope.ok, true, JSON.stringify(envelope.error))
+		const byId = new Map(envelope.layers.map(entry => [entry.id, entry]))
+		const dup = byId.get(rig.dup)
+		assert.equal(dup.attrs.count, 7)
+		assert.equal(dup.attrs.staggerOffset, 3)
+		const label = byId.get(rig.label)
+		assert.equal(label.attrs.fontSize, 64)
+		assert.equal(label.attrs['material.materialColor'], '#FF0044')
+		const card = byId.get(rig.card)
+		assert.equal(card.attrs['material.materialColor'], '#112233')
+		// Geometry is Stage 4's contract, not this readback's.
+		assert.equal(card.attrs.position, undefined)
+		assert.equal(card.attrs.scale, undefined)
+		assert.ok(card.animated.includes('position.x'))
+		assert.deepEqual(envelope.compResolution, [1920, 1080])
+		assert.equal(envelope.frame, handle.scene.frame)
+		// Literal path answers the identical layer documents.
+		const { body: direct } = await postJson(handle, '/export_comp_rig_overrides', { seq: 'rig2', layerIds: [rig.dup, rig.label, rig.card] })
+		assert.deepEqual(direct.layers, envelope.layers)
 	})
 })
 

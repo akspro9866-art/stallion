@@ -51,6 +51,11 @@ import {
 	normalizeBatchInspectJob,
 } from '../cavalry/modules/BatchInspect.ts'
 import {
+	EXPORT_COMP_RIG_OVERRIDES_TYPE,
+	exportCompRigOverridesScript,
+	normalizeExportRigOverridesJob,
+} from '../cavalry/modules/ExportCompRigOverrides.ts'
+import {
 	CHECKPOINT_TYPE,
 	ROLLBACK_TYPE,
 	checkpointScript,
@@ -386,7 +391,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					// Same shape as the live heartbeat: introspection is a `type` on POST /post,
 					// and only the mock additionally answers GET /state, /layers, /frame and the
 					// literal POST /batch-step route.
-					introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
+					introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
 				mgRuntime: true,
 				errorEnvelope: 1,
 				mock: true,
@@ -602,6 +607,17 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return runIntrospect(batchInspectScript(normalized.job), BATCH_INSPECT_TYPE, parsed)
 	}
 
+	const handleExportCompRigOverridesPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const normalized = normalizeExportRigOverridesJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(EXPORT_COMP_RIG_OVERRIDES_TYPE, normalized.error.code, normalized.error.error, {
+				seq: parsed.seq ?? null,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		return runIntrospect(exportCompRigOverridesScript(normalized.job), EXPORT_COMP_RIG_OVERRIDES_TYPE, parsed)
+	}
+
 	const handleCheckpointPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const job = normalizeCheckpointJob(parsed).job
 		const envelope = runIntrospect(checkpointScript(job), CHECKPOINT_TYPE, parsed)
@@ -763,7 +779,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				const body =
 					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, POST /batch-step, ' +
 					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch, ' +
-					'/batch_inspect, /checkpoint, /rollback, /render_frame_fast\n'
+					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
@@ -775,13 +791,15 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			const fastPath =
 				url.pathname === '/batch_inspect'
 					? handleBatchInspectPost
-					: url.pathname === '/checkpoint'
-						? handleCheckpointPost
-						: url.pathname === '/rollback'
-							? handleRollbackPost
-							: url.pathname === '/render_frame_fast'
-								? handleRenderFrameFastPost
-								: null
+					: url.pathname === '/export_comp_rig_overrides'
+						? handleExportCompRigOverridesPost
+						: url.pathname === '/checkpoint'
+							? handleCheckpointPost
+							: url.pathname === '/rollback'
+								? handleRollbackPost
+								: url.pathname === '/render_frame_fast'
+									? handleRenderFrameFastPost
+									: null
 			if (fastPath && (request.method === 'POST' || request.method === 'GET')) {
 				let parsed: Record<string, unknown> = { seq: url.searchParams.get('seq') ?? `${url.pathname.slice(1)}-${Date.now()}` }
 				if (url.searchParams.get('comp') !== null) parsed.compId = url.searchParams.get('comp')
@@ -978,6 +996,9 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === BATCH_INSPECT_TYPE) {
 						envelope = handleBatchInspectPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === EXPORT_COMP_RIG_OVERRIDES_TYPE) {
+						envelope = handleExportCompRigOverridesPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === CHECKPOINT_TYPE) {
 						envelope = handleCheckpointPost(parsed)

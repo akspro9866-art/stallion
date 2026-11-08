@@ -93,6 +93,9 @@ const TEXT_ATTRS: Record<string, AttrDef> = {
 	pathTravel: num(0),
 	pathPush: num(0),
 	pathLoop: bool(false),
+	// `_mg.text` colours copy through the material, exactly like shapes.
+	material: any,
+	'material.materialColor': color('#ffffff'),
 }
 
 /** Node types the mock models. Everything else validates as a generic node. */

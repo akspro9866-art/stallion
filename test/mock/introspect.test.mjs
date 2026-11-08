@@ -86,6 +86,7 @@ test('heartbeat advertises introspection and the error envelope', async () => {
 			'snapshot-batch',
 			'batch-step',
 			'batch_inspect',
+			'export_comp_rig_overrides',
 			'checkpoint',
 			'rollback',
 			'render_frame_fast',

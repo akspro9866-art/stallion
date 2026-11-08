@@ -49,6 +49,11 @@ import {
 	normalizeBatchInspectJob,
 } from './BatchInspect.ts'
 import {
+	EXPORT_COMP_RIG_OVERRIDES_TYPE,
+	exportCompRigOverridesScript,
+	normalizeExportRigOverridesJob,
+} from './ExportCompRigOverrides.ts'
+import {
 	CHECKPOINT_TYPE,
 	ROLLBACK_TYPE,
 	checkpointScript,
@@ -156,6 +161,7 @@ const CANONICAL_RESULT_KINDS = new Set<string>([
 	'snapshot-batch',
 	'batch-step',
 	'batch_inspect',
+	'export_comp_rig_overrides',
 	'checkpoint',
 	'rollback',
 	'render_frame_fast',
@@ -253,7 +259,7 @@ export class Callbacks {
 					.every((key) => typeof (api as unknown as Record<string, unknown>)[key] === 'function'),
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
-				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
 				// `_mg`/`_rb` + the declarative manifest interpreter are preloaded at
 				// startup, so batch-step and helpers:true scripts carry no runtime bytes.
 				mgRuntime: true,
@@ -349,6 +355,10 @@ export class Callbacks {
 		}
 		if (parsed.type === BATCH_INSPECT_TYPE) {
 			this.#handleBatchInspect(parsed)
+			return
+		}
+		if (parsed.type === EXPORT_COMP_RIG_OVERRIDES_TYPE) {
+			this.#handleExportCompRigOverrides(parsed)
 			return
 		}
 		if (parsed.type === CHECKPOINT_TYPE) {
@@ -951,6 +961,31 @@ __deliver(__json);
 		if (!success) {
 			this.#serve(errorEnvelope(BATCH_INSPECT_TYPE, ERROR_CODES.EXEC_FAILED, 'batch_inspect failed to execute in the Cavalry script host.', { seq, mgCall }))
 			console.error('Stallion: batch_inspect failed to execute')
+		}
+	}
+
+	/**
+	 * `/export_comp_rig_overrides` — bounded procedural/visual attribute readback
+	 * for folding manual UI tweaks back into a cloned style preset (see
+	 * ExportCompRigOverrides.ts). Single state read; the playhead is untouched.
+	 */
+	#handleExportCompRigOverrides = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
+		const normalized = normalizeExportRigOverridesJob(parsed as Record<string, unknown>)
+		if ('error' in normalized) {
+			this.#serve(errorEnvelope(EXPORT_COMP_RIG_OVERRIDES_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))
+			console.error(`Stallion: export_comp_rig_overrides rejected — ${normalized.error.error}`)
+			return
+		}
+		const success = api.exec(SCRIPT_ID, this.#wrapped(exportCompRigOverridesScript(normalized.job), seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { ...inner, seq: doc.seq, kind: EXPORT_COMP_RIG_OVERRIDES_TYPE, ok: doc.ok === true && inner.ok !== false }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(EXPORT_COMP_RIG_OVERRIDES_TYPE, ERROR_CODES.EXEC_FAILED, 'export_comp_rig_overrides failed to execute in the Cavalry script host.', { seq, mgCall }))
+			console.error('Stallion: export_comp_rig_overrides failed to execute')
 		}
 	}
 
