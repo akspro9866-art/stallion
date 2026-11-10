@@ -58,3 +58,8 @@ reuse a publisher ID you do not own. Local packaging keeps working:
   README protocol section together, and say which payloads move.
 - Read [SECURITY.md](SECURITY.md) before touching execution or auth paths;
   mandatory token auth is a proposed breaking change, not a default.
+- Skills shared across the stack are canonical in `cavalry-mcp/.qoder/skills/`.
+  The copies here are compared byte-for-byte by `npm run test:ci` when a
+  cavalry-mcp checkout is available (a sibling `../cavalry-mcp`, or
+  `CAVALRY_MCP_PATH` / `CAVALRY_MCP_DIR`), and the comparison is skipped cleanly
+  otherwise. Edit the canonical copy first, then synchronise this one.
