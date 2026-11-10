@@ -1,7 +1,7 @@
 /**
  * Stallion — HTTP bridge callbacks.
  *
- * Bridge protocol (v0.10, see README):
+ * Bridge protocol (v0.11, see README):
  *
  *   POST /post  { type, code, path?, seq? }   — as before, plus an optional
  *              caller-supplied `seq` used to match results. Script posts may
