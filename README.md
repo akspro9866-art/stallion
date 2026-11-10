@@ -31,7 +31,7 @@ a headless mock bridge that speaks the same protocol without Cavalry.
 - [Build and install](#build-and-install)
 - [Use from VS Code](#use-from-vs-code)
 - [Configuration](#configuration)
-- [Bridge protocol (v0.10)](#bridge-protocol-v010)
+- [Bridge protocol (v0.11)](#bridge-protocol-v011)
 - [Execution receipts and state snapshots](#execution-receipts-and-state-snapshots)
 - [Scene readback](#scene-readback)
 - [Frame capture](#frame-capture)
@@ -219,6 +219,11 @@ The file lives in Cavalry's application data folder, i.e. the folder returned by
 
 All keys are optional. A missing, unreadable or malformed file falls back to the defaults; it never
 prevents the bridge from starting. Token auth is applied with `server.setTokenAuthentication(token)`.
+
+> **Security callout** — the bridge executes arbitrary scripts inside Cavalry and token auth is
+> optional. Bind to localhost (`127.0.0.1`) wherever possible, and set a `token` if the port is
+> reachable by anything else: without one, any client that can reach the port can execute scripts
+> in your open scene. Starting without a token logs a startup warning; see [SECURITY.md](SECURITY.md).
 
 ### VS Code side — settings
 

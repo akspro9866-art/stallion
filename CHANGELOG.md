@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Fixed` for any bug fixes
 - `Security` in case of vulnerabilities
 
+## [Unreleased]
+
+### Security
+
+- Startup warning when the bridge listens without a token configured
+  (warning only — auth remains optional for backwards compatibility).
+
+### Proposed
+
+- Making token auth mandatory (at least for non-loopback binds) is a
+  deliberate breaking change reserved for a future release decision; this
+  pass only warns and documents the risk. Not shipped here.
+
 ## [0.11.0] - 2026-11-07
 
 Fast-loop endpoints for the deterministic refinement pipeline (Stage 4.5).

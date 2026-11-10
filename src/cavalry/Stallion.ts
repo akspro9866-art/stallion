@@ -41,6 +41,10 @@ server.setHighFrequency()
 if (config.token) {
 	(server as unknown as { setTokenAuthentication(token: string): void }).setTokenAuthentication(config.token)
 	console.warn('Stallion: token authentication enabled via stallion.json')
+} else {
+	console.warn(
+		`Stallion: no token configured — ${config.host}:${config.port} accepts unauthenticated script execution. Keep the default 127.0.0.1 bind, or set "token" in stallion.json if the port is reachable by anything else.`,
+	)
 }
 
 // Serve a heartbeat on GET /get until the first script result arrives.
