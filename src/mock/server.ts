@@ -24,7 +24,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 import { MockApi, type MockFrameBuffer } from './api.ts'
-import { MockScene, sceneDigest } from './scene.ts'
+import { MockScene } from './scene.ts'
 import { encodePng, rasterizeFrame } from './raster.ts'
 import {
 	ERROR_CODES,
@@ -73,12 +73,18 @@ import {
 	batchEvalAndCaptureScript,
 	normalizeBatchEvalAndCaptureJob,
 } from '../cavalry/modules/BatchEvalAndCapture.ts'
+import { executeOnMock } from './execute.ts'
+import { bearerOk, readBody } from './http-utils.ts'
+import { introspectQuery, inlineWanted } from './query.ts'
+import { buildReceipt } from './receipt.ts'
+
+// Moved to execute.ts; re-exported to keep the original public path.
+export { executeOnMock } from './execute.ts'
 
 export const MOCK_VERSION = '0.11.0'
 
 const RESULT_TYPE = '__stallion_result__'
 const RENDER_FRAMES_TYPE = 'render-frames'
-const MAX_BODY_BYTES = 32 * 1024 * 1024
 const MAX_INLINE_FRAMES = 64
 
 export interface MockServerOptions {
@@ -105,232 +111,6 @@ export interface MockServerHandle {
 	api: MockApi
 	lastFrames: () => MockFrameBuffer[]
 	close: () => Promise<void>
-}
-
-interface ConsoleEntry {
-	level: string
-	text: string
-}
-
-/**
- * A `GET /state?frame=42&attrs=position.x,opacity` query into the same payload shape
- * `POST /post` accepts, so both surfaces reach one handler and cannot drift apart.
- * Unknown keys are ignored rather than rejected: a client asking for `?debug=1` should
- * still get its scene back.
- */
-function introspectQuery(url: URL, kind: 'state' | 'layers' | 'snapshot' | 'snapshot-batch'): Record<string, unknown> {
-	const q = url.searchParams
-	const pick = (...names: string[]): string | null => {
-		for (const name of names) {
-			const value = q.get(name)
-			if (value !== null) return value
-		}
-		return null
-	}
-	const parsed: Record<string, unknown> = { type: kind, seq: pick('seq') ?? `get-${kind}-${Date.now()}` }
-	const frame = pick('frame', 't')
-	if (frame !== null) parsed.frame = frame
-	if (kind === 'snapshot' || kind === 'snapshot-batch') {
-		const scale = pick('scale', 'resolutionScale')
-		if (scale !== null) parsed.scale = scale
-		const outDir = pick('outDir', 'out')
-		if (outDir !== null) parsed.outDir = outDir
-		const fileName = pick('fileName', 'name')
-		if (fileName !== null) parsed.fileName = fileName
-		if (kind === 'snapshot-batch') {
-			const frames = pick('frames')
-			if (frames !== null) parsed.frames = frames.split(',').map((s) => s.trim()).filter(Boolean)
-			const layerIds = pick('layerIds')
-			if (layerIds !== null) parsed.layerIds = layerIds.split(',').map((s) => s.trim()).filter(Boolean)
-			const attrs = pick('attrs')
-			if (attrs !== null) parsed.attrs = attrs.split(',').map((s) => s.trim()).filter(Boolean)
-			if (/^(1|true|yes)$/i.test(pick('includeHidden') ?? '')) parsed.includeHidden = true
-		}
-	} else {
-		const offset = pick('offset')
-		if (offset !== null) parsed.offset = offset
-		const limit = pick('limit')
-		if (limit !== null) parsed.limit = limit
-		const budgetMs = pick('budgetMs', 'budget')
-		if (budgetMs !== null) parsed.budgetMs = budgetMs
-		const attrs = pick('attrs', 'attributes')
-		if (attrs !== null) {
-			// `?attrs=a,b` selects values; `?attributes=1` asks for every declared
-			// attribute instead, so the two spellings must not be conflated.
-			if (/^(1|true|yes)$/i.test(attrs)) parsed.attributes = true
-			else parsed.attrs = attrs.split(',').map((s) => s.trim()).filter(Boolean)
-		}
-	}
-	const comp = pick('comp', 'compId')
-	if (comp !== null) parsed.compId = comp
-	const mgCall = pick('mgCall')
-	if (mgCall !== null) parsed.mgCall = mgCall
-	return parsed
-}
-
-/**
- * Should a snapshot answer carry inline pixels? `?inline=0` or `{inline:false}`
- * turns them off: the file path, size and hashes are the contract, the bytes are a
- * convenience for callers that would otherwise poll the disk.
- */
-function inlineWanted(parsed: Record<string, unknown>, url: URL): boolean {
-	const value = parsed.inline ?? url.searchParams.get('inline') ?? '1'
-	return value !== false && !/^(0|false)$/i.test(String(value))
-}
-
-function bearerOk(request: http.IncomingMessage, token: string): boolean {
-	if (!token) return true
-	const header = request.headers.authorization ?? ''
-	return header === `Bearer ${token}`
-}
-
-function readBody(request: http.IncomingMessage): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const chunks: Buffer[] = []
-		let size = 0
-		request.on('data', (chunk: Buffer) => {
-			size += chunk.length
-			if (size > MAX_BODY_BYTES) {
-				reject(new Error('request body too large'))
-				request.destroy()
-				return
-			}
-			chunks.push(chunk)
-		})
-		request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-		request.on('error', reject)
-	})
-}
-
-/** Execute script code against the mock scene in a fresh vm context. */
-export function executeOnMock(
-	code: string,
-	api: MockApi,
-	options: { verbose?: boolean; context?: vm.Context } = {},
-): { result: unknown; error: string | null; stack: string | null; console: ConsoleEntry[]; state: Record<string, unknown> | null } {
-	const entries: ConsoleEntry[] = []
-	const sandboxConsole = {
-		log: (...args: unknown[]) => entries.push({ level: 'log', text: args.map(String).join(' ') }),
-		info: (...args: unknown[]) => entries.push({ level: 'info', text: args.map(String).join(' ') }),
-		warn: (...args: unknown[]) => entries.push({ level: 'warn', text: args.map(String).join(' ') }),
-		error: (...args: unknown[]) => entries.push({ level: 'error', text: args.map(String).join(' ') }),
-	}
-	const isAtomic = code.startsWith('/* cavalry-mcp:atomic */')
-	const trimmed = isAtomic ? code : `(function () {
-		if (typeof api.startUndoGroup === 'function') api.startUndoGroup('AI Motion Batch');
-		try {
-			return (function () { ${code}\n})();
-		} finally {
-			if (typeof api.endUndoGroup === 'function') api.endUndoGroup();
-		}
-	})()`
-	const before = new Set(api.scene.layers.keys())
-	const sandbox: Record<string, unknown> = {
-		api,
-		console: sandboxConsole,
-		__result: undefined,
-		__stallionState: undefined,
-		cavalry: {
-			versionLessThan: () => false,
-			Path: class {
-				d = ''
-				setD(d: string) {
-					this.d = String(d)
-					return this
-				}
-			},
-		},
-	}
-	let result: unknown
-	let error: string | null = null
-	let stack: string | null = null
-	try {
-		if (options.context) {
-			// Persistent preloaded context (preloadMg: true): the sandbox global
-			// state — including `globalThis._mg` from the startup preload —
-			// survives between calls, exactly like a live shared script context.
-			const ctx = options.context as unknown as Record<string, unknown>
-			ctx.__result = undefined
-			ctx.__stallionState = undefined
-			ctx.__stallionRunConsole = sandboxConsole
-			result = vm.runInContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, options.context, {
-				timeout: 30_000,
-			})
-		} else {
-			result = vm.runInNewContext(`var __returned = (${trimmed}); typeof __result === 'undefined' ? __returned : __result`, sandbox, {
-				timeout: 30_000,
-			})
-		}
-	} catch (err) {
-		const e = err as Error
-		error = String(e?.message ?? e)
-		stack = e?.stack ?? null
-	}
-	if (options.verbose && entries.length) {
-		for (const entry of entries) process.stderr.write(`[mock:${entry.level}] ${entry.text}\n`)
-	}
-	const createdLayerIds = [...api.scene.layers.keys()].filter((id) => !before.has(id))
-	const comp = api.scene.activeComp()
-	const boundingBoxes: Record<string, unknown> = {}
-	const receiptIds = [...new Set([...createdLayerIds, ...api.scene.selection])].slice(0, 50)
-	for (const id of receiptIds) {
-		const box = api.scene.boundingBox(id)
-		if (box) boundingBoxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, centre: box.centre }
-	}
-	const state: Record<string, unknown> = {
-		seq: null,
-		status: error ? 'error' : 'ok',
-		errorStack: stack,
-		createdLayerIds,
-		activeSelection: [...api.scene.selection],
-		compInfo: comp
-			? { id: comp.id, name: comp.name, fps: comp.fps, startFrame: comp.startFrame, endFrame: comp.endFrame, resolution: [comp.width, comp.height], width: comp.width, height: comp.height }
-			: null,
-		boundingBoxes,
-		durationMs: 0,
-		writtenAt: new Date().toISOString(),
-	}
-	if (api.scene.diagnostics.length) {
-		;(state as Record<string, unknown>).diagnostics = api.scene.diagnostics.slice()
-	}
-	return { result, error, stack, console: entries, state }
-}
-
-/** Deterministic receipt for the current scene state. */
-function buildReceipt(scene: MockScene, consoleEntries: ConsoleEntry[], receiptIds: string[], beatFrames: number[]): Record<string, unknown> {
-	const beatBBoxes: Record<string, unknown> = {}
-	const frames = beatFrames.slice(0, 32)
-	if (frames.length) {
-		const previous = scene.frame
-		try {
-			for (const frame of frames) {
-				scene.frame = frame
-				const boxes: Record<string, unknown> = {}
-				for (const id of receiptIds.slice(0, 50)) {
-					const box = scene.boundingBox(id)
-					const rotation = scene.layer(id) ? Number(scene.getAttr(scene.layer(id)!, 'rotation')) || 0 : 0
-					if (box) boxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, pivotX: box.centre.x, pivotY: box.centre.y, rotation }
-				}
-				beatBBoxes[String(frame)] = boxes
-			}
-		} finally {
-			scene.frame = previous
-		}
-	}
-	const facts = scene.facts()
-	const parts = facts.layers.map((l) => `${l.id}:${l.type}@k=${l.keyframes}`)
-	// Schema rejections and other scene diagnostics surface as warnings — the
-	// live bridge reports them through its console probe instead.
-	const diagnostics: ConsoleEntry[] = consoleEntries.slice(0, 64).map((e) => ({ level: e.level, text: e.text.slice(0, 240) }))
-	for (const entry of scene.diagnostics) {
-		if (diagnostics.length >= 64) break
-		diagnostics.push({ level: entry.level, text: entry.text.slice(0, 240) })
-	}
-	return {
-		sceneStateHash: sceneDigest(`nodes(${parts.join(';')})conn(${facts.connections.join(';')})`),
-		consoleDiagnostics: diagnostics,
-		beatBBoxes,
-	}
 }
 
 export function startMockServer(options: MockServerOptions = {}): Promise<MockServerHandle> {
