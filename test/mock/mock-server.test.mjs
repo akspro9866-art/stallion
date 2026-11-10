@@ -214,3 +214,66 @@ test('script errors come back as ok:false with the message', async () => {
 		assert.match(envelope.error, /boom/)
 	})
 })
+
+test('GET /health returns version 0.11.0, purityGate: true, and all 7 Astryx themes', async () => {
+	await withServer(async (handle) => {
+		const res = await fetch(`http://127.0.0.1:${handle.port}/health`)
+		assert.equal(res.status, 200)
+		const payload = await res.json()
+		assert.deepEqual(payload, {
+			version: '0.11.0',
+			status: 'ok',
+			purityGate: true,
+			themes: ['neutral', 'matcha', 'gothic', 'butter', 'stone', 'chocolate', 'y2k'],
+		})
+	})
+})
+
+test('POST /execute enforces purity gate (HTTP 422 on impure script) and auto-injects _mg.applySceneTheme(theme) inside atomic undo', async () => {
+	await withServer(async (handle) => {
+		const layersBefore = handle.scene.layers.size
+		const impureScript = `const s = api.create("basicShape", "Bad");
+api.set(s, { "material.materialColor": "#14221C", "strokeColor": "#10B981" });
+for (let f = 0; f < 20; f++) { api.keyframe(s, "position.y", f, f * 2); }`
+
+		const rejectRes = await fetch(`http://127.0.0.1:${handle.port}/execute`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ script: impureScript, theme: 'matcha', enforcePurity: true }),
+		})
+		assert.equal(rejectRes.status, 422)
+		const rejectBody = await rejectRes.json()
+		assert.equal(rejectBody.error, 'Purity gate failed')
+		assert.ok(rejectBody.score < 75)
+		assert.ok(Array.isArray(rejectBody.violations) && rejectBody.violations.length > 0)
+		assert.ok(typeof rejectBody.autoFixPrompt === 'string' && rejectBody.autoFixPrompt.length > 0)
+		assert.equal(handle.scene.layers.size, layersBefore, 'scene untouched when purity gate rejects')
+
+		const pureScript = `api.startUndo("Create Matcha Card");
+try {
+  const card = _mg.shape("rect", "MatchaCard", {
+    w: 320,
+    h: 180,
+    fill: _mg.theme.cardFill,
+    radius: _mg.theme.cardCornerRadius
+  });
+  __result = { card, fill: _mg.theme.cardFill, radius: _mg.theme.cardCornerRadius };
+} finally {
+  api.endUndo();
+}`
+		const okRes = await fetch(`http://127.0.0.1:${handle.port}/execute`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ script: pureScript, theme: 'matcha', enforcePurity: true }),
+		})
+		assert.equal(okRes.status, 200)
+		const okBody = await okRes.json()
+		assert.equal(okBody.ok, true)
+		assert.equal(okBody.theme, 'matcha')
+		assert.equal(okBody.purity.passed, true)
+		assert.equal(okBody.purity.grade, 'A')
+		assert.equal(okBody.result.fill, '#14221C')
+		assert.equal(okBody.result.radius, 14)
+	})
+})
+

@@ -459,6 +459,14 @@ export class MockApi {
 		this.scene.endUndoGroup()
 	}
 
+	startUndo(name = 'Scene Execution'): void {
+		this.scene.startUndoGroup(String(name))
+	}
+
+	endUndo(): void {
+		this.scene.endUndoGroup()
+	}
+
 	// ------------------------------------------------------------- rendering
 
 	renderPNGFrame(basePath: string, scalePercent = 100): boolean {

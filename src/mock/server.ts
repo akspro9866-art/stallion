@@ -77,6 +77,8 @@ import { executeOnMock } from './execute.ts'
 import { bearerOk, readBody } from './http-utils.ts'
 import { introspectQuery, inlineWanted } from './query.ts'
 import { buildReceipt } from './receipt.ts'
+import { ASTRYX_THEME_NAMES, resolveAstryxTheme } from '../themes/astryx-themes.ts'
+import { validateMgPurity, injectSceneThemeInsideUndo } from '../validation/validate-mg-purity.ts'
 
 // Moved to execute.ts; re-exported to keep the original public path.
 export { executeOnMock } from './execute.ts'
@@ -557,11 +559,79 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			}
 			if (request.method === 'GET' && url.pathname === '/') {
 				const body =
-					'Stallion mock bridge — POST /post, GET /get, POST /render-frames, POST /batch-step, ' +
+					'Stallion mock bridge — POST /post, GET /get, GET /health, POST /execute, POST /render-frames, POST /batch-step, ' +
 					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch, ' +
 					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
+				return
+			}
+			if (request.method === 'GET' && url.pathname === '/health') {
+				serveJson(response, {
+					version: MOCK_VERSION,
+					status: 'ok',
+					purityGate: true,
+					themes: [...ASTRYX_THEME_NAMES],
+				})
+				return
+			}
+			if (request.method === 'POST' && url.pathname === '/execute') {
+				let parsedBody: Record<string, unknown> = {}
+				try {
+					const raw = await readBody(request)
+					if (raw.trim()) parsedBody = JSON.parse(raw) as Record<string, unknown>
+				} catch (err) {
+					const message = String((err as Error)?.message ?? err)
+					const status = /too large/i.test(message) ? 413 : 400
+					serveJson(response, { ok: false, error: message }, status)
+					return
+				}
+				const rawScript =
+					typeof parsedBody.script === 'string'
+						? parsedBody.script
+						: typeof parsedBody.code === 'string'
+							? parsedBody.code
+							: ''
+				const resolvedTheme = resolveAstryxTheme(
+					typeof parsedBody.theme === 'string' ? parsedBody.theme : 'neutral',
+				)
+				const enforcePurity = parsedBody.enforcePurity !== false
+				if (enforcePurity) {
+					const purity = validateMgPurity(rawScript)
+					if (!purity.passed) {
+						serveJson(
+							response,
+							{
+								error: 'Purity gate failed',
+								score: purity.score,
+								grade: purity.grade,
+								violations: purity.violations,
+								autoFixPrompt: purity.autoFixPrompt,
+							},
+							422,
+						)
+						return
+					}
+				}
+				const preparedCode = injectSceneThemeInsideUndo(rawScript, resolvedTheme.themeName)
+				const execEnvelope = handleScriptPost({
+					...parsedBody,
+					code: preparedCode,
+					helpers: true,
+					seq: parsedBody.seq ?? `execute-${Date.now()}`,
+				})
+				const finalPurity = validateMgPurity(preparedCode)
+				const responsePayload = {
+					...execEnvelope,
+					theme: resolvedTheme.themeName,
+					purity: {
+						score: finalPurity.score,
+						grade: finalPurity.grade,
+						passed: finalPurity.passed,
+					},
+				}
+				lastPayload = responsePayload
+				serveJson(response, responsePayload, 200)
 				return
 			}
 			// Literal batch-step route: the live bridge multiplexes batch-step as a
@@ -788,6 +858,50 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === RENDER_FRAME_FAST_TYPE) {
 						envelope = handleRenderFrameFastPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === 'health') {
+						envelope = {
+							version: MOCK_VERSION,
+							status: 'ok',
+							purityGate: true,
+							themes: [...ASTRYX_THEME_NAMES],
+						}
+						lastPayload = envelope
+					} else if (parsed.type === 'execute') {
+						const rawScript =
+							typeof parsed.script === 'string'
+								? parsed.script
+								: typeof parsed.code === 'string'
+									? parsed.code
+									: ''
+						const resolvedTheme = resolveAstryxTheme(
+							typeof parsed.theme === 'string' ? parsed.theme : 'neutral',
+						)
+						const enforcePurity = parsed.enforcePurity !== false
+						if (enforcePurity) {
+							const purity = validateMgPurity(rawScript)
+							if (!purity.passed) {
+								envelope = {
+									kind: 'execute',
+									seq: parsed.seq ?? null,
+									ok: false,
+									status: 422,
+									error: 'Purity gate failed',
+									score: purity.score,
+									grade: purity.grade,
+									violations: purity.violations,
+									autoFixPrompt: purity.autoFixPrompt,
+								}
+								lastPayload = envelope
+								return envelope
+							}
+						}
+						const preparedCode = injectSceneThemeInsideUndo(rawScript, resolvedTheme.themeName)
+						envelope = handleScriptPost({
+							...parsed,
+							code: preparedCode,
+							helpers: true,
+						})
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)

@@ -84,6 +84,8 @@ import {
 import { mgHelpersPreamble } from './mg-preamble.ts'
 import { renderFramesScript } from './render-frames.ts'
 import { reshapeWrappedResult } from './result-envelope.ts'
+import { ASTRYX_THEME_NAMES, resolveAstryxTheme } from '../../themes/astryx-themes.ts'
+import { validateMgPurity, injectSceneThemeInsideUndo } from '../../validation/validate-mg-purity.ts'
 
 // Moved to mg-preamble.ts; re-exported so existing importers (the mock
 // bridge, protocol tests) keep the original path.
@@ -144,6 +146,10 @@ interface PostPayload {
 	 * `_mg` calls without carrying the helper library on every request.
 	 */
 	helpers?: unknown
+	/** execute payload: script, theme, enforcePurity */
+	script?: string
+	theme?: string
+	enforcePurity?: boolean
 }
 
 /** Run fn, returning null on any throw — bridge code must never die on reads. */
@@ -336,6 +342,47 @@ export class Callbacks {
 		if (parsed.type === RENDER_FRAME_FAST_TYPE) {
 			this.#handleRenderFrameFast(parsed)
 			return
+		}
+		if (parsed.type === 'health') {
+			this.#serve({
+				version: VERSION,
+				status: 'ok',
+				purityGate: true,
+				themes: [...ASTRYX_THEME_NAMES],
+			})
+			return
+		}
+		if (parsed.type === 'execute') {
+			const rawScript =
+				typeof parsed.script === 'string'
+					? parsed.script
+					: typeof parsed.code === 'string'
+						? parsed.code
+						: ''
+			const resolvedTheme = resolveAstryxTheme(
+				typeof parsed.theme === 'string' ? parsed.theme : 'neutral',
+			)
+			const enforcePurity = parsed.enforcePurity !== false
+			if (enforcePurity) {
+				const purity = validateMgPurity(rawScript)
+				if (!purity.passed) {
+					this.#serve({
+						kind: 'execute',
+						seq: parsed.seq ?? null,
+						ok: false,
+						status: 422,
+						error: 'Purity gate failed',
+						score: purity.score,
+						grade: purity.grade,
+						violations: purity.violations,
+						autoFixPrompt: purity.autoFixPrompt,
+					})
+					return
+				}
+			}
+			parsed.type = 'script'
+			parsed.code = injectSceneThemeInsideUndo(rawScript, resolvedTheme.themeName)
+			parsed.helpers = true
 		}
 
 		const { type, code, path, seq, statePath } = parsed

@@ -26,5 +26,15 @@ export function mgHelpersPreamble(mgRuntimeSource: string): string {
 	return { mg: _mg, rb: _rb };
 })();
 var _mg = __mgEnv.mg;
-var _rb = __mgEnv.rb;`
+var _rb = __mgEnv.rb;
+try {
+	if (typeof api !== 'undefined' && api) {
+		if (typeof api.startUndo !== 'function' && typeof api.startUndoGroup === 'function') {
+			api.startUndo = function (name) { return api.startUndoGroup(String(name || 'Scene Execution')); };
+		}
+		if (typeof api.endUndo !== 'function' && typeof api.endUndoGroup === 'function') {
+			api.endUndo = function () { return api.endUndoGroup(); };
+		}
+	}
+} catch (e) {}`
 }
