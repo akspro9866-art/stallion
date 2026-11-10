@@ -20,7 +20,7 @@ a headless mock bridge that speaks the same protocol without Cavalry.
 
 > **Fork notice** — this repository is a fork of
 > [scenery-io/stallion](https://github.com/scenery-io/stallion), based on upstream 0.8.0 and grown
-> into the 0.10.0 bridge documented here. The additions are additive and backwards compatible: the
+> into the 0.11.0 bridge documented here. The additions are additive and backwards compatible: the
 > original `POST /post` payload still works, `seq` remains optional, and legacy file-based clients
 > are untouched. See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -404,7 +404,7 @@ Before any request has run, `GET /get` returns the startup heartbeat:
 ```json
 {
   "kind": "status",
-  "stallion": "0.10.0",
+  "stallion": "0.11.0",
   "cavalry": "2.8.0",
   "scene": "C:/work/scene.cv",
   "frame": 0,
@@ -753,7 +753,7 @@ requests receive HTTP 401.
 - **Path-shaped introspection** as an alternative to the `type`-shaped requests available to the
   live bridge.
 
-The heartbeat differs only in values: `stallion: "0.10.0-mock"`, `cavalry: "2.8.0-mock"`,
+The heartbeat differs only in values: `stallion: "0.11.0-mock"`, `cavalry: "2.8.0-mock"`,
 `scene: "mock://scene.cv"`, and `capabilities.mock: true`.
 
 ## Safety and atomicity
@@ -850,10 +850,12 @@ extension bundle. Generate one with `npx @vscode/vsce package` when you need to 
   default `http://127.0.0.1:8080`.
 - 0.9.0 added the result channel, status heartbeat, `stallion.json`, token auth and applied/skipped
   lists. 0.10.0 added receipts, scene readback, snapshots, `render-frames`, the mock bridge and CI.
+  0.11.0 added the fast-loop endpoints `batch_inspect`, `checkpoint`/`rollback` and
+  `render_frame_fast`.
 - Clients can feature-detect the 0.10 surface from `capabilities` on the heartbeat: `receipt`,
   `renderFrames`, `introspect` and `errorEnvelope`.
 - The version is shown in the Stallion panel and in the heartbeat's `stallion` field. The source
-  version lives in `src/cavalry/modules/Callbacks.ts` (`VERSION`); the package version is `0.10.0`.
+  version lives in `src/cavalry/modules/Callbacks.ts` (`VERSION`); the package version is `0.11.0`.
 - cavalry-mcp 3.x and refclone's read-only client target this 0.10 surface. The upstream marketplace
   extension remains the original project, not this fork.
 
