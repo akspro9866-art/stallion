@@ -5,6 +5,8 @@
 <br/>
 
 ![CI](https://github.com/akspro9866-art/stallion/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Node.js 20 | 22 | 24](https://img.shields.io/badge/Node.js-20%20%7C%2022%20%7C%2024-339933?logo=node.js&logoColor=white)
 
 **A scripting bridge for [Cavalry](https://cavalry.scenegroup.co/): drive a live scene over HTTP,
 capture what changed, and verify rendered frames — from VS Code, an MCP server, or CI.**
@@ -24,8 +26,54 @@ a headless mock bridge that speaks the same protocol without Cavalry.
 > original `POST /post` payload still works, `seq` remains optional, and legacy file-based clients
 > are untouched. See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
+## What it does in 20 seconds
+
+Stallion turns a running Cavalry instance into a scriptable HTTP endpoint: POST a script, poll one
+GET slot for the result, and get back a deterministic receipt (scene hash, console diagnostics,
+beat bounding boxes) plus optional frame snapshots — so an agent, an editor or CI can build a
+scene, verify what changed and render proof frames without touching the UI. A headless mock speaks
+the identical wire contract for machines that do not have Cavalry.
+
+## Quickstart (5 minutes)
+
+Prerequisites: Node.js 20, 22 or 24, and Cavalry 2.4.0+ for the live bridge (VS Code 1.101+ is
+optional). No Cavalry? The mock path below needs only Node.
+
+1. Build the bundles — production mode, because plain `npm run build` starts a watch loop:
+
+   ```bash
+   npm ci
+   npx cross-env NODE_ENV=production npm run build
+   ```
+
+2. Install and enable the bridge, either:
+   - **Live:** `npm run deploy` copies `dist/Stallion.js` into Cavalry's Scripts folder; then open
+     Cavalry and run **Scripts → Stallion**, or
+   - **Mock:** `node dist/stallion-mock.mjs --mock` — same protocol, in-memory scene.
+
+   The VS Code extension (F5 from this repo, or `npx @vscode/vsce package` then *Install from VSIX*)
+   installs the script automatically on activation — see [Build and install](#build-and-install).
+
+3. Post the minimal documented script and read the answer back:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:8080/post \
+     -H "Content-Type: application/json" \
+     -d '{"type":"script","code":"__result = api.getCavalryVersion();","seq":"demo-1"}'
+   curl -s http://127.0.0.1:8080/get
+   ```
+
+   `GET /get` serves the latest payload, so match `seq: "demo-1"` before trusting it (see
+   [Client flow](#client-flow)). With a token configured, add `-H "Authorization: Bearer <token>"`
+   to both calls.
+
+Everything else — expressions, readback, snapshots, batch rendering — rides the same two endpoints;
+start at [Bridge protocol (v0.11)](#bridge-protocol-v011).
+
 ## Contents
 
+- [What it does in 20 seconds](#what-it-does-in-20-seconds)
+- [Quickstart (5 minutes)](#quickstart-5-minutes)
 - [How it fits](#how-it-fits)
 - [Requirements](#requirements)
 - [Build and install](#build-and-install)
