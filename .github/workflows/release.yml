@@ -1,0 +1,40 @@
+name: Release
+
+# Preparation only: pushing a v* tag runs CI and then creates a GitHub
+# Release whose notes are the matching CHANGELOG section. Tagging is a
+# manual maintainer step. The existing v3.0.0-saas-120 tag predates this
+# machinery and has no matching CHANGELOG section; version tags here
+# follow the package version (next: v0.11.0).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:ci
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Extract matching CHANGELOG section
+        run: node scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md

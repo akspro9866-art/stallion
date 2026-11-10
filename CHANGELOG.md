@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Tag-triggered release workflow (`.github/workflows/release.yml`) plus
+  `scripts/release-notes.mjs`: pushing a `v*` tag will run CI and create a
+  GitHub Release from the matching CHANGELOG section. Preparation only —
+  no tag or release was published in this pass.
+
 ### Security
 
 - Startup warning when the bridge listens without a token configured
