@@ -99,8 +99,22 @@ export class MockApi {
 
 	set(id: string, attrs: Record<string, unknown>): void {
 		const layer = this.#require(id)
-		for (const [path, value] of Object.entries(attrs ?? {})) {
-			this.scene.setAttr(layer, path, value)
+		for (const [attrPath, value] of Object.entries(attrs ?? {})) {
+			this.scene.setAttr(layer, attrPath, value)
+			// Keep dynamic attribute aliases in step (rawName, array.<name>, dynamic.<name>, uniforms.<name>).
+			const rawName = attrPath.replace(/^(array|dynamic|uniforms)\./, '')
+			if (layer.dynamicAttrs?.has(rawName) || layer.dynamicAttrs?.has(attrPath)) {
+				for (const alias of [rawName, `array.${rawName}`, `dynamic.${rawName}`, `uniforms.${rawName}`]) {
+					layer.attrs.set(alias, value)
+				}
+			}
+			// Auto-register uniform attributes declared in SkSL shader/filter source.
+			if ((layer.type === 'skslShader' || layer.type === 'skslFilter') && (attrPath === 'code' || attrPath === 'shaderCode') && typeof value === 'string') {
+				for (const match of value.matchAll(/\buniform\s+(?:float|int|bool|half\d*|vec\d+|float\d+|mat\d+|shader)\s+([A-Za-z_]\w*)\s*;/g)) {
+					const uName = match[1]
+					this.addDynamicAttribute(layer.id, 'double', uName)
+				}
+			}
 		}
 		this.#syncCompRecord(layer)
 	}
@@ -133,13 +147,48 @@ export class MockApi {
 
 	// ----------------------------------------------------------- structure
 
+	addDynamic(id: string, typeOrName: string, nameOrType: string, defaultValue?: unknown): string {
+		return this.addDynamicAttribute(id, typeOrName, nameOrType, defaultValue)
+	}
+
+	addDynamicAttribute(id: string, typeOrName: string, nameOrType: string, defaultValue?: unknown): string {
+		const layer = this.#require(id)
+		const knownTypes = new Set(['double', 'float', 'int', 'integer', 'bool', 'boolean', 'color', 'string', 'point', 'point2d', 'number'])
+		const a = String(typeOrName ?? 'double')
+		const b = String(nameOrType ?? 'param')
+		const firstIsType = knownTypes.has(a.toLowerCase()) && !knownTypes.has(b.toLowerCase())
+		const attrType = firstIsType ? a : b
+		const attrName = firstIsType ? b : a
+		const rawName = attrName.replace(/^(array|dynamic|uniforms)\./, '')
+		if (!layer.dynamicAttrs) layer.dynamicAttrs = new Map()
+		const initVal =
+			defaultValue !== undefined && !(typeof defaultValue === 'boolean' && attrType !== 'bool' && attrType !== 'boolean')
+				? defaultValue
+				: attrType === 'color'
+					? '#ffffff'
+					: attrType === 'string'
+						? ''
+						: attrType === 'point' || attrType === 'point2d'
+							? [0, 0]
+							: attrType === 'bool' || attrType === 'boolean'
+								? false
+								: 0
+		for (const alias of [rawName, `array.${rawName}`, `dynamic.${rawName}`, `uniforms.${rawName}`]) {
+			layer.dynamicAttrs.set(alias, { type: attrType, name: rawName, defaultValue: initVal })
+			if (!layer.attrs.has(alias)) layer.attrs.set(alias, initVal)
+		}
+		return attrName.includes('.') ? attrName : `dynamic.${rawName}`
+	}
+
 	connect(srcId: string, srcAttr: string, dstId: string, dstAttr: string, force?: boolean): void {
 		const src = this.#require(srcId)
 		const dst = this.#require(dstId)
-		if (!isConnectableAttribute(src.type, String(srcAttr))) {
+		const srcDynamic = src.dynamicAttrs?.has(String(srcAttr)) === true
+		const dstDynamic = dst.dynamicAttrs?.has(String(dstAttr)) === true
+		if (!srcDynamic && !isConnectableAttribute(src.type, String(srcAttr))) {
 			this.scene.warn(`connect: unknown source attribute ${src.id}.${srcAttr}`)
 		}
-		if (!isKnownAttribute(dst.type, String(dstAttr)) && !isConnectableAttribute(dst.type, String(dstAttr))) {
+		if (!dstDynamic && !isKnownAttribute(dst.type, String(dstAttr)) && !isConnectableAttribute(dst.type, String(dstAttr))) {
 			this.scene.warn(`connect: unknown target attribute ${dst.id}.${dstAttr}`)
 		}
 		this.scene.connect(src.id, String(srcAttr), dst.id, String(dstAttr), force === true)
@@ -296,6 +345,9 @@ export class MockApi {
 
 	getAttributeDefinition(id: string, attr: string): { name: string; type: string } | null {
 		const layer = this.#require(id)
+		if (layer.dynamicAttrs?.has(String(attr))) {
+			return { name: String(attr), type: layer.dynamicAttrs.get(String(attr))!.type }
+		}
 		if (!isKnownAttribute(layer.type, String(attr))) return null
 		return { name: String(attr), type: 'attribute' }
 	}
@@ -383,7 +435,47 @@ export class MockApi {
 			width: box.width,
 			height: box.height,
 			centre: box.centre,
+			left: box.left,
+			right: box.right,
+			top: box.top,
+			bottom: box.bottom,
 			world: world !== false,
+		}
+	}
+
+	getChildren(id: string): string[] {
+		const parentId = String(id)
+		return [...this.scene.layers.values()].filter((l) => l.parentId === parentId).map((l) => l.id)
+	}
+
+	getRenderQueueItems(): string[] {
+		const existing = [...this.scene.layers.values()].filter((l) => l.type === 'renderQueueItem').map((l) => l.id)
+		if (existing.length > 0) return existing
+		const created = this.scene.createLayer('renderQueueItem', 'Render Queue Item 1')
+		this.scene.setAttr(created, 'selected', true)
+		return [created.id]
+	}
+
+	addRenderQueueItem(_compId?: string): string {
+		const created = this.scene.createLayer('renderQueueItem', 'Render Queue Item')
+		this.scene.setAttr(created, 'selected', true)
+		return created.id
+	}
+
+	getJsLogPath(): string {
+		return path.join(this.getAppDataFolder(), 'logs', 'js_log.txt')
+	}
+
+	appendJsLog(entries: Array<{ level: string; text: string }>): void {
+		if (!entries.length) return
+		const lines = entries.map((e) => `[${String(e.level).toUpperCase()}] ${e.text}`).join('\n') + '\n'
+		for (const target of [this.getJsLogPath(), path.join(this.getAppDataFolder(), 'js_log.txt')]) {
+			try {
+				fs.mkdirSync(path.dirname(target), { recursive: true })
+				fs.appendFileSync(target, lines, 'utf8')
+			} catch {
+				// Best-effort log persistence in mock sandbox
+			}
 		}
 	}
 

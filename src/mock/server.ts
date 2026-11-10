@@ -76,12 +76,37 @@ import {
 import { executeOnMock } from './execute.ts'
 import { bearerOk, readBody } from './http-utils.ts'
 import { introspectQuery, inlineWanted } from './query.ts'
-import { buildReceipt } from './receipt.ts'
+import {
+	buildReceipt,
+	captureJsLogDiagnostics,
+	isExpressionPayloadType,
+	payloadTypeToExecutionContext,
+	validateCavalryContextUsage,
+	validateSkslSource,
+	type ConsoleEntry,
+	type ExpressionPayloadType,
+	type ExpressionReceipt,
+} from './receipt.ts'
 import { ASTRYX_THEME_NAMES, resolveAstryxTheme } from '../themes/astryx-themes.ts'
 import { validateMgPurity, injectSceneThemeInsideUndo } from '../validation/validate-mg-purity.ts'
 
 // Moved to execute.ts; re-exported to keep the original public path.
 export { executeOnMock } from './execute.ts'
+export {
+	buildReceipt,
+	captureJsLogDiagnostics,
+	CAVALRY_EXECUTION_CONTEXTS,
+	CONTEXT_GLOBALS_BY_CONTEXT,
+	EXPRESSION_PAYLOAD_TYPES,
+	isExpressionPayloadType,
+	payloadTypeToExecutionContext,
+	validateCavalryContextUsage,
+	validateSkslSource,
+	type CavalryExecutionContext,
+	type ConsoleEntry,
+	type ExpressionPayloadType,
+	type ExpressionReceipt,
+} from './receipt.ts'
 
 export const MOCK_VERSION = '0.11.0'
 
@@ -523,6 +548,117 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return envelope
 	}
 
+	const handleExpressionPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const type = typeof parsed.type === 'string' ? parsed.type : ''
+		const code = typeof parsed.code === 'string' ? parsed.code : ''
+		if (!code) {
+			return { type: RESULT_TYPE, kind: 'result', seq, ok: false, error: 'Missing/empty `code` key in request' }
+		}
+		const beatFrames = Array.isArray(parsed.beatFrames)
+			? parsed.beatFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f))
+			: []
+		const applied: string[] = []
+		const skipped: string[] = []
+		const diagEntries: ConsoleEntry[] = []
+		let valid = true
+		let uniforms: Array<{ type: string; name: string }> | undefined
+
+		if (type.startsWith('javaScript') || type.startsWith('sksl')) {
+			let selection: string[] = []
+			if (typeof parsed.targetId === 'string' && parsed.targetId) {
+				selection = [parsed.targetId]
+			} else if (typeof parsed.layerId === 'string' && parsed.layerId) {
+				selection = [parsed.layerId]
+			} else {
+				selection = api.getSelection()
+			}
+			if (!selection.length) {
+				const layerId = api.create(type)
+				selection = [layerId]
+			}
+			let attribute = 'expression'
+			if (type === 'javaScriptShape') {
+				attribute = 'generator.expression'
+			} else if (type.startsWith('sksl')) {
+				attribute = 'code'
+			}
+			for (const layerId of selection) {
+				const layerType = api.getLayerType(layerId)
+				if (layerType !== type) {
+					const name = api.getNiceName(layerId)
+					skipped.push(String(name))
+					diagEntries.push({
+						level: 'warn',
+						text: `Stallion: Skipped layer '${String(name)}' because it is not of type '${type}'`,
+					})
+					continue
+				}
+				api.set(layerId, { [attribute]: code })
+				applied.push(String(layerId))
+				if (typeof parsed.attachTo === 'string' && parsed.attachTo) {
+					if (type === 'skslShader') {
+						api.connect(layerId, 'id', parsed.attachTo, 'material.shader')
+					} else if (type === 'skslFilter') {
+						api.connect(layerId, 'id', parsed.attachTo, 'filters')
+					}
+				}
+			}
+			if (type.startsWith('sksl')) {
+				const skslCheck = validateSkslSource(code)
+				valid = skslCheck.valid
+				uniforms = skslCheck.uniforms
+				diagEntries.push(...skslCheck.diagnostics)
+			} else {
+				const ctxCheck = validateCavalryContextUsage(code, type)
+				valid = ctxCheck.valid
+				diagEntries.push(...ctxCheck.diagnostics)
+			}
+		} else if (type.toLowerCase().includes('render')) {
+			let items = api.getRenderQueueItems()
+			if (!items.length && parsed.autoCreateRenderQueueItem !== false) {
+				const createdId = api.addRenderQueueItem()
+				items = [createdId]
+			}
+			for (const layerId of items) {
+				const selected = api.get(layerId, 'selected')
+				if (selected) {
+					api.set(layerId, { [type]: code })
+					applied.push(String(layerId))
+				}
+			}
+			const ctxCheck = validateCavalryContextUsage(code, 'render')
+			valid = ctxCheck.valid
+			diagEntries.push(...ctxCheck.diagnostics)
+		}
+
+		if (diagEntries.length) {
+			api.appendJsLog(diagEntries)
+		}
+		const baseReceipt = buildReceipt(scene, diagEntries, applied, beatFrames)
+		const jsLogDiagnostics = captureJsLogDiagnostics(api.getJsLogPath())
+		const context = payloadTypeToExecutionContext(type)
+		const receipt: ExpressionReceipt = {
+			...baseReceipt,
+			payloadType: (isExpressionPayloadType(type) ? type : 'javaScriptUtility') as ExpressionPayloadType,
+			context,
+			applied,
+			skipped,
+			jsLogDiagnostics,
+			valid,
+			...(uniforms ? { uniforms } : {}),
+		}
+		return {
+			type: RESULT_TYPE,
+			kind: 'result',
+			seq,
+			ok: true,
+			applied,
+			skipped,
+			receipt,
+		}
+	}
+
 	/**
 	 * A batch answer carries paths and boxes; the mock can additionally hand back
 	 * pixels because it is real Node. Keep the payload bounded to the first 16
@@ -905,6 +1041,12 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === 'script' || parsed.path) {
 						envelope = handleScriptPost(parsed)
+						lastPayload = envelope
+					} else if (
+						typeof parsed.type === 'string' &&
+						(parsed.type.startsWith('javaScript') || parsed.type.startsWith('sksl') || parsed.type.toLowerCase().includes('render'))
+					) {
+						envelope = handleExpressionPost(parsed)
 						lastPayload = envelope
 					} else {
 						envelope = { type: RESULT_TYPE, kind: 'result', seq: parsed.seq ?? null, ok: false, error: `Unexpected type '${String(parsed.type)}'` }

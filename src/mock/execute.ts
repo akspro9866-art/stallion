@@ -79,8 +79,21 @@ export function executeOnMock(
 	const receiptIds = [...new Set([...createdLayerIds, ...api.scene.selection])].slice(0, 50)
 	for (const id of receiptIds) {
 		const box = api.scene.boundingBox(id)
-		if (box) boundingBoxes[id] = { x: box.x, y: box.y, width: box.width, height: box.height, centre: box.centre }
+		if (box) {
+			boundingBoxes[id] = {
+				x: box.x,
+				y: box.y,
+				width: box.width,
+				height: box.height,
+				left: box.left,
+				right: box.right,
+				top: box.top,
+				bottom: box.bottom,
+				centre: box.centre,
+			}
+		}
 	}
+	api.appendJsLog([...entries, ...api.scene.diagnostics])
 	const state: Record<string, unknown> = {
 		seq: null,
 		status: error ? 'error' : 'ok',

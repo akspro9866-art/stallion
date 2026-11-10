@@ -9,3 +9,11 @@
 - Never loop single-action calls from automation clients. Use the sibling `cavalry-mcp` project's `cavalry_run_script` or `bin/stallion-cli.mjs` for one-shot batches.
 - Keep results structured and compact: `{ ok, result }` or `{ ok:false, error, stack }` with the caller's `seq`.
 - Preserve direct VS Code posts and legacy file-based clients when changing the dispatcher.
+
+## Stage-by-Stage Skill Loading & Context Parity
+
+Shared motion-design skills under `.qoder/skills/` and `.agents/skills/` stay byte-for-byte synchronized with `cavalry-mcp/.qoder/skills/` (verified by `node .github/scripts/skill-parity.mjs`):
+- **Stage 0/1 (Brand & Ingest)**: `brand-intake`, `reanimate`
+- **Stage 2 (Choreography & Mixing)**: `mix-and-match`, `motion-design-skill`, `canonical-motion-moves`, `apple-launch-film`, `antigravity-design-expert`, `motion-design`
+- **Stage 3/4 (Procedural Compilation & Color)**: `color-motion`, `kinetic-typography-skills`, `data-animation-skills`, `motion-graphics`
+- **Stage 5/6 (QA, Critique & Audio)**: `review-loop`, `director-gate-check`, `motion-design-critique`, `shot-composition`, `sound-design`

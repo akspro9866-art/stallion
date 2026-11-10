@@ -33,7 +33,10 @@ export interface MockLayer {
 	parentId: string | null
 	attrs: Map<string, unknown>
 	keyframes: Map<string, MockKeyframe[]>
+	dynamicAttrs?: Map<string, { type: string; name: string; defaultValue?: unknown }>
 	deformerIds: string[]
+	shaderIds?: string[]
+	filterIds?: string[]
 	inFrame: number
 	outFrame: number
 }
@@ -242,7 +245,10 @@ export class MockScene {
 			parentId: null,
 			attrs: new Map(),
 			keyframes: new Map(),
+			dynamicAttrs: new Map(),
 			deformerIds: [],
+			shaderIds: [],
+			filterIds: [],
 			inFrame: 0,
 			outFrame: comp.endFrame,
 		}
@@ -275,7 +281,8 @@ export class MockScene {
 	}
 
 	setAttr(layer: MockLayer, path: string, value: unknown): boolean {
-		if (!isKnownAttribute(layer.type, path)) {
+		const isDynamic = layer.dynamicAttrs?.has(path) === true
+		if (!isDynamic && !isKnownAttribute(layer.type, path)) {
 			const message = `set: unknown attribute path '${path}' on ${layer.type}`
 			if (this.strictSchema) {
 				this.warn(message + ' (not applied)')
@@ -303,7 +310,34 @@ export class MockScene {
 		return true
 	}
 
-	getAttr(layer: MockLayer, path: string): unknown {
+	getAttr(layer: MockLayer, path: string, visited?: Set<string>): unknown {
+		const visitKey = `${layer.id}.${path}`
+		if (!visited?.has(visitKey)) {
+			const incoming = this.connections.find((c) => c.dstId === layer.id && c.dstAttr === path)
+			if (incoming) {
+				const srcLayer = this.layer(incoming.srcId)
+				if (srcLayer) {
+					const nextVisited = new Set(visited)
+					nextVisited.add(visitKey)
+					if (incoming.srcAttr !== 'id') {
+						const propagated = this.getAttr(srcLayer, incoming.srcAttr, nextVisited)
+						if (propagated !== undefined) return propagated
+					} else if (srcLayer.type === 'value' || srcLayer.type === 'value2') {
+						const propagated = this.getAttr(srcLayer, 'value', nextVisited)
+						if (propagated !== undefined) return propagated
+					} else if (srcLayer.type === 'valueBlend') {
+						const valA = this.getAttr(srcLayer, 'a', nextVisited)
+						const valB = this.getAttr(srcLayer, 'b', nextVisited)
+						const weightRaw = Number(this.getAttr(srcLayer, 'weight', nextVisited))
+						const t = Number.isFinite(weightRaw) ? Math.max(0, Math.min(1, weightRaw / 100)) : 0.5
+						if (typeof valA === 'number' && typeof valB === 'number') return lerp(valA, valB, t)
+						const ptA = asPoint(valA)
+						const ptB = asPoint(valB)
+						if (ptA && ptB) return [lerp(ptA[0], ptB[0], t), lerp(ptA[1], ptB[1], t)]
+					}
+				}
+			}
+		}
 		if (layer.keyframes.has(path)) {
 			const kfs = layer.keyframes.get(path)!
 			if (kfs.length > 0) return this.evaluate(layer, path, this.frame)
@@ -311,9 +345,13 @@ export class MockScene {
 		const compound = this.evaluateCompoundPoint(layer, path)
 		if (compound) return compound
 		if (layer.attrs.has(path)) return layer.attrs.get(path)
+		if (layer.dynamicAttrs?.has(path)) {
+			const dyn = layer.dynamicAttrs.get(path)!
+			if (dyn.defaultValue !== undefined) return dyn.defaultValue
+		}
 		const pointMatch = /^(.*)\.(x|y)$/.exec(path)
 		if (pointMatch) {
-			const parentValue = this.getAttr(layer, pointMatch[1])
+			const parentValue = this.getAttr(layer, pointMatch[1], visited)
 			const pt = asPoint(parentValue)
 			if (pt) return pt[pointMatch[2] === 'x' ? 0 : 1]
 		}
@@ -462,6 +500,14 @@ export class MockScene {
 		this.connections.push({ srcId: src.id, srcAttr, dstId: dst.id, dstAttr })
 		const deformerMatch = /^(deformers)\.?/.exec(dstAttr)
 		if (deformerMatch && !dst.deformerIds.includes(src.id)) dst.deformerIds.push(src.id)
+		if (/^material\.(shader|colorShaders)\b/.test(dstAttr)) {
+			if (!dst.shaderIds) dst.shaderIds = []
+			if (!dst.shaderIds.includes(src.id)) dst.shaderIds.push(src.id)
+		}
+		if (/^filters\b/.test(dstAttr)) {
+			if (!dst.filterIds) dst.filterIds = []
+			if (!dst.filterIds.includes(src.id)) dst.filterIds.push(src.id)
+		}
 	}
 
 	inConnectedAttributes(id: string): string[] {
@@ -497,9 +543,12 @@ export class MockScene {
 		if (!layer) return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 }
 		const pos = asPoint(this.getAttr(layer, 'position')) ?? [0, 0]
 		const scale = asPoint(this.getAttr(layer, 'scale')) ?? [100, 100]
+		const normScale = (s: number): number => (Math.abs(s) > 0 && Math.abs(s) <= 10 ? s : s / 100)
+		const sxLocal = normScale(scale[0])
+		const syLocal = normScale(scale[1])
 		const rotation = Number(this.getAttr(layer, 'rotation')) || 0
 		if (!layer.parentId) {
-			return { x: pos[0], y: pos[1], scaleX: scale[0] / 100, scaleY: scale[1] / 100, rotation }
+			return { x: pos[0], y: pos[1], scaleX: sxLocal, scaleY: syLocal, rotation }
 		}
 		const parentT = this.worldTransform(layer.parentId)
 		const rad = (parentT.rotation * Math.PI) / 180
@@ -510,8 +559,8 @@ export class MockScene {
 		return {
 			x: parentT.x + sx * cos - sy * sin,
 			y: parentT.y + sx * sin + sy * cos,
-			scaleX: parentT.scaleX * (scale[0] / 100),
-			scaleY: parentT.scaleY * (scale[1] / 100),
+			scaleX: parentT.scaleX * sxLocal,
+			scaleY: parentT.scaleY * syLocal,
 			rotation: parentT.rotation + rotation,
 		}
 	}
@@ -523,12 +572,17 @@ export class MockScene {
 		width: number
 		height: number
 		centre: { x: number; y: number }
+		left: number
+		right: number
+		top: number
+		bottom: number
 	} | null {
 		const layer = this.layer(layerId)
 		if (!layer) return null
 		const def = nodeDef(layer.type)
 		if (!def.visual) return null
-		const dims = asPoint(this.getAttr(layer, 'generator.dimensions')) ?? this.visualSize(layer)
+		const hasExplicitDims = layer.attrs.has('generator.dimensions') || layer.keyframes.has('generator.dimensions') || layer.keyframes.has('generator.dimensions.x') || layer.keyframes.has('generator.dimensions.y')
+		const dims = hasExplicitDims ? (asPoint(this.getAttr(layer, 'generator.dimensions')) ?? this.visualSize(layer)) : this.visualSize(layer)
 		const t = this.worldTransform(layerId)
 		const w = Math.abs(dims[0] * t.scaleX)
 		const h = Math.abs(dims[1] * t.scaleY)
@@ -540,12 +594,20 @@ export class MockScene {
 		const pivot = asPoint(this.getAttr(layer, 'pivot')) ?? [0, 0]
 		const cx = t.x - pivot[0] * t.scaleX
 		const cy = t.y - pivot[1] * t.scaleY
+		const left = cx - extX / 2
+		const right = cx + extX / 2
+		const top = cy - extY / 2
+		const bottom = cy + extY / 2
 		return {
-			x: cx - extX / 2,
-			y: cy - extY / 2,
+			x: left,
+			y: top,
 			width: extX,
 			height: extY,
 			centre: { x: cx, y: cy },
+			left,
+			right,
+			top,
+			bottom,
 		}
 	}
 
@@ -557,6 +619,19 @@ export class MockScene {
 			if (textBox && textBox[0] > 0 && textBox[1] > 0) return textBox
 			return [Math.max(1, text.length) * size * 0.55, size * 1.2]
 		}
+		if (layer.attrs.has('generator.radius') || layer.attrs.has('radius')) {
+			const rKey = layer.attrs.has('generator.radius') ? 'generator.radius' : 'radius'
+			const rRaw = this.getAttr(layer, rKey)
+			if (typeof rRaw === 'number' && Number.isFinite(rRaw) && rRaw > 0) {
+				return [rRaw * 2, rRaw * 2]
+			}
+			const rPt = asPoint(rRaw)
+			if (rPt && (rPt[0] > 0 || rPt[1] > 0)) {
+				return [Math.abs(rPt[0]) * 2, Math.abs(rPt[1]) * 2]
+			}
+		}
+		const genDims = asPoint(this.getAttr(layer, 'generator.dimensions'))
+		if (genDims && genDims[0] > 0 && genDims[1] > 0) return genDims
 		if (textBox && textBox[0] > 0 && textBox[1] > 0) return textBox
 		return [100, 100]
 	}
@@ -612,7 +687,19 @@ export class MockScene {
 		}
 		if (!Array.isArray(data.comps) || !Array.isArray(data.layers)) throw new Error('invalid scene checkpoint')
 		this.comps = new Map(data.comps.map((c) => [c.id, c]))
-		this.layers = new Map(data.layers.map((l) => [l.id, { ...l, attrs: new Map(l.attrs), keyframes: new Map(l.keyframes) }]))
+		this.layers = new Map(
+			data.layers.map((l) => [
+				l.id,
+				{
+					...l,
+					attrs: new Map(l.attrs),
+					keyframes: new Map(l.keyframes),
+					dynamicAttrs: new Map(),
+					shaderIds: l.shaderIds ?? [],
+					filterIds: l.filterIds ?? [],
+				},
+			]),
+		)
 		this.connections = data.connections
 		this.selection = data.selection
 		this.activeCompId = data.activeCompId

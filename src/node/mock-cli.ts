@@ -10,10 +10,51 @@
  */
 
 import { pathToFileURL } from 'node:url'
-import { bootMockFromArgv, shouldBootMock, startMockServer, type MockServerHandle, type MockServerOptions } from '../mock/server.ts'
+import {
+	bootMockFromArgv,
+	buildReceipt,
+	captureJsLogDiagnostics,
+	CAVALRY_EXECUTION_CONTEXTS,
+	CONTEXT_GLOBALS_BY_CONTEXT,
+	executeOnMock,
+	EXPRESSION_PAYLOAD_TYPES,
+	isExpressionPayloadType,
+	payloadTypeToExecutionContext,
+	shouldBootMock,
+	startMockServer,
+	validateCavalryContextUsage,
+	validateSkslSource,
+	type CavalryExecutionContext,
+	type ConsoleEntry,
+	type ExpressionPayloadType,
+	type ExpressionReceipt,
+	type MockServerHandle,
+	type MockServerOptions,
+} from '../mock/server.ts'
 
-export { bootMockFromArgv, shouldBootMock, startMockServer }
-export type { MockServerHandle, MockServerOptions }
+export {
+	bootMockFromArgv,
+	buildReceipt,
+	captureJsLogDiagnostics,
+	CAVALRY_EXECUTION_CONTEXTS,
+	CONTEXT_GLOBALS_BY_CONTEXT,
+	executeOnMock,
+	EXPRESSION_PAYLOAD_TYPES,
+	isExpressionPayloadType,
+	payloadTypeToExecutionContext,
+	shouldBootMock,
+	startMockServer,
+	validateCavalryContextUsage,
+	validateSkslSource,
+}
+export type {
+	CavalryExecutionContext,
+	ConsoleEntry,
+	ExpressionPayloadType,
+	ExpressionReceipt,
+	MockServerHandle,
+	MockServerOptions,
+}
 
 const invokedDirectly = (() => {
 	try {

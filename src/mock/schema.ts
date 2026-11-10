@@ -66,16 +66,28 @@ const BASE: Record<string, AttrDef> = {
 const SHAPE_GENERATOR: Record<string, AttrDef> = {
 	generator: any,
 	'generator.dimensions': point(100, 100),
+	'generator.radius': point(50, 50),
 	'generator.cornerRadius': num(0),
+	'generator.tlRadius': num(0),
+	'generator.trRadius': num(0),
+	'generator.brRadius': num(0),
+	'generator.blRadius': num(0),
 	'generator.chamfer': num(0),
 	'generator.divisions': num(0),
 	'generator.radiusTop': num(0),
 	'generator.radiusBottom': num(0),
 	'generator.vectorize': bool(false),
+	'generator.expression': str(),
+	radius: point(50, 50),
 	material: any,
 	'material.materialColor': color('#ffffff'),
 	'material.alpha': num(1),
 	'material.colorShaders': any,
+	'material.shader': any,
+	'stroke.strokeColor': color('#ffffff'),
+	'stroke.width': num(1),
+	strokeColor: color('#ffffff'),
+	strokeWidth: num(1),
 }
 
 const TEXT_ATTRS: Record<string, AttrDef> = {
@@ -134,29 +146,101 @@ export const NODE_TYPES: Record<string, NodeDef> = {
 	},
 	falloff: {
 		visual: false,
-		attributes: { falloffType: str('linear'), influence: num(1), radius: num(100), position: point(0, 0) },
+		attributes: {
+			...BASE,
+			falloffType: str('linear'),
+			influence: num(1),
+			radius: num(100),
+			size: point(100, 100),
+			strength: num(100),
+			shapeType: num(0),
+			position: point(0, 0),
+		},
 	},
-	stagger: { visual: false, attributes: { delayFrames: num(4), staggerType: str('temporal') } },
-	noise: { visual: false, attributes: { frequency: num(1), timeScale: num(1), seed: num(0), amplitude: num(1) } },
-	oscillator: { visual: false, attributes: { frequency: num(1), amplitude: num(1), phase: num(0), waveType: str('sine') } },
-	subMesh: { visual: false, attributes: { subMeshLevel: num(0) } },
-	travel: { visual: false, attributes: { travel: num(0), start: num(0), end: num(100) } },
-	bevel: { visual: false, attributes: { bevelRadius: num(4), cornerRadius: num(4) } },
-	boolean: { visual: false, attributes: { booleanMode: str('union') } },
-	pathfinder: { visual: false, attributes: { pathfinderMode: str('union') } },
-	blurFilter: { visual: false, attributes: { blurRadius: num(4) } },
-	gaussianBlurFilter: { visual: false, attributes: { blurRadius: num(4) } },
+	stagger: { visual: false, attributes: { ...BASE, delayFrames: num(4), staggerType: str('temporal'), offset: num(4) } },
+	noise: {
+		visual: false,
+		attributes: {
+			...BASE,
+			frequency: num(1),
+			timeScale: num(1),
+			seed: num(0),
+			amplitude: num(1),
+			strength: num(10),
+			'generator.frequency': num(1),
+			'generator.seed': num(0),
+			falloffs: any,
+		},
+	},
+	oscillator: { visual: false, attributes: { ...BASE, frequency: num(1), amplitude: num(1), phase: num(0), waveType: str('sine') } },
+	subMesh: {
+		visual: false,
+		attributes: {
+			...BASE,
+			subMeshLevel: num(0),
+			levelMode: num(0),
+			timeOffset: num(0),
+			falloffs: any,
+		},
+	},
+	travel: { visual: false, attributes: { ...BASE, travel: num(0), start: num(0), end: num(100) } },
+	bevel: { visual: false, attributes: { ...BASE, bevelRadius: num(4), cornerRadius: num(4) } },
+	boolean: { visual: false, attributes: { ...BASE, booleanMode: str('union') } },
+	pathfinder: { visual: false, attributes: { ...BASE, pathfinderMode: str('union') } },
+	blurFilter: { visual: false, attributes: { ...BASE, blurRadius: num(4) } },
+	gaussianBlurFilter: { visual: false, attributes: { ...BASE, blurRadius: num(4) } },
 	dropShadowFilter: {
 		visual: false,
-		attributes: { shadowRadius: num(4), shadowOffsetX: num(0), shadowOffsetY: num(4), shadowColor: color('#000000'), shadowOpacity: num(0.5) },
+		attributes: { ...BASE, shadowRadius: num(4), shadowOffsetX: num(0), shadowOffsetY: num(4), shadowColor: color('#000000'), shadowOpacity: num(0.5) },
 	},
-	innerShadowFilter: { visual: false, attributes: { shadowRadius: num(4) } },
-	grainFilter: { visual: false, attributes: { grainAmount: num(0.2) } },
-	backgroundBlurFilter: { visual: false, attributes: { blurRadius: num(4) } },
-	connectShape: { visual: false, attributes: { targetMode: any, maxConnections: num(10), curve: bool(false) } },
-	meshDistribution: { visual: false, attributes: { distribution: str('linear') } },
-	null: { visual: false, attributes: {} },
-	camera: { visual: false, attributes: {} },
+	innerShadowFilter: { visual: false, attributes: { ...BASE, shadowRadius: num(4) } },
+	grainFilter: { visual: false, attributes: { ...BASE, grainAmount: num(0.2) } },
+	backgroundBlurFilter: { visual: false, attributes: { ...BASE, blurRadius: num(4) } },
+	connectShape: { visual: false, attributes: { ...BASE, targetMode: any, maxConnections: num(10), curve: bool(false) } },
+	meshDistribution: { visual: false, attributes: { ...BASE, distribution: str('linear') } },
+	null: { visual: false, attributes: { ...BASE } },
+	camera: { visual: false, attributes: { ...BASE } },
+	javaScriptShape: { visual: true, attributes: { ...BASE, ...SHAPE_GENERATOR, expression: str(), 'generator.expression': str() } },
+	javaScriptUtility: { visual: false, attributes: { ...BASE, expression: str(), output: num(0) } },
+	javaScriptModifier: { visual: false, attributes: { ...BASE, expression: str(), output: num(0) } },
+	javaScriptDeformer: { visual: false, attributes: { ...BASE, expression: str(), falloffs: any } },
+	javaScriptEmitter: { visual: false, attributes: { ...BASE, expression: str() } },
+	skslShader: { visual: false, attributes: { ...BASE, code: str(), shaderCode: str(), uniforms: any } },
+	skslFilter: { visual: false, attributes: { ...BASE, code: str(), shaderCode: str(), uniforms: any } },
+	renderQueueItem: {
+		visual: false,
+		attributes: {
+			...BASE,
+			selected: bool(true),
+			preRenderExpression: str(),
+			postRenderExpression: str(),
+			renderSetupExpression: str(),
+		},
+	},
+	linearGradient: {
+		visual: false,
+		attributes: { ...BASE, stops: any, angle: num(0), start: point(-100, 0), end: point(100, 0), generator: any },
+	},
+	value: { visual: false, attributes: { ...BASE, value: num(0) } },
+	value2: { visual: false, attributes: { ...BASE, value: point(0, 0) } },
+	valueBlend: { visual: false, attributes: { ...BASE, a: any, b: any, weight: num(50) } },
+	transformConstraint: { visual: false, attributes: { ...BASE, weight: num(100), target: any } },
+	align: { visual: false, attributes: { ...BASE, x: num(0), y: num(0), alignX: num(0), alignY: num(0) } },
+	spring: { visual: false, attributes: { ...BASE, stiffness: num(200), damping: num(20), mass: num(1) } },
+	stringGenerator: {
+		visual: false,
+		attributes: {
+			...BASE,
+			number: num(0),
+			precision: num(0),
+			prefix: str(),
+			suffix: str(),
+			'generator.number': num(0),
+			'generator.precision': num(0),
+			'generator.prefix': str(),
+			'generator.suffix': str(),
+		},
+	},
 }
 
 const GENERIC: NodeDef = { visual: false, attributes: {} }
@@ -168,9 +252,11 @@ export function nodeDef(type: string): NodeDef {
 /**
  * True when `path` names a known attribute (exact match, or a component of a
  * known compound like `position.x` under `position`, or a known compound
- * under a bare parent like `generator.dimensions` under `generator`).
+ * under a bare parent like `generator.dimensions` under `generator`, or a
+ * registered dynamic/uniform attribute namespace).
  */
 export function isKnownAttribute(type: string, path: string): boolean {
+	if (path.startsWith('array.') || path.startsWith('dynamic.') || path.startsWith('uniforms.')) return true
 	const def = nodeDef(type)
 	if (path in def.attributes) return true
 	const dot = path.lastIndexOf('.')
@@ -185,5 +271,16 @@ export function isKnownAttribute(type: string, path: string): boolean {
 
 /** Attribute paths every valid layer accepts — used for connect() checks. */
 export function isConnectableAttribute(type: string, attr: string): boolean {
-	return isKnownAttribute(type, attr) || attr === 'deformers' || attr === 'generator' || attr === 'masks'
+	return (
+		isKnownAttribute(type, attr) ||
+		attr === 'id' ||
+		attr === 'deformers' ||
+		attr === 'generator' ||
+		attr === 'masks' ||
+		attr === 'filters' ||
+		attr === 'falloffs' ||
+		attr === 'material.shader' ||
+		attr === 'material.colorShaders' ||
+		attr === 'transform'
+	)
 }

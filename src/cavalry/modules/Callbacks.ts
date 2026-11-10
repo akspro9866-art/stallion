@@ -458,18 +458,33 @@ export class Callbacks {
 			}
 			const applied: string[] = []
 			const skipped: string[] = []
+			const consoleDiagnostics: Array<{ level: string; text: string }> = []
 			for (const layerId of selection) {
 				const layerType = api.getLayerType(layerId)
 				if (layerType !== type) {
 					const name = api.getNiceName(layerId)
 					skipped.push(String(name))
-					console.warn(`Stallion: Skipped layer '${name}' because it is not of type '${type}'`)
+					const msg = `Stallion: Skipped layer '${name}' because it is not of type '${type}'`
+					consoleDiagnostics.push({ level: 'warn', text: msg })
+					console.warn(msg)
 					continue
 				}
 				api.set(layerId, { [attribute]: code })
 				applied.push(String(layerId))
 			}
-			this.#serve({ kind: 'result', seq, ok: true, applied, skipped })
+			this.#serve({
+				kind: 'result',
+				seq,
+				ok: true,
+				applied,
+				skipped,
+				receipt: {
+					payloadType: type,
+					applied,
+					skipped,
+					consoleDiagnostics,
+				},
+			})
 			console.log(`Stallion: Successfully applied expression`)
 			return
 		}
@@ -484,7 +499,18 @@ export class Callbacks {
 					applied.push(String(layerId))
 				}
 			}
-			this.#serve({ kind: 'result', seq, ok: true, applied })
+			this.#serve({
+				kind: 'result',
+				seq,
+				ok: true,
+				applied,
+				receipt: {
+					payloadType: type,
+					applied,
+					skipped: [],
+					consoleDiagnostics: [],
+				},
+			})
 			console.log(`Stallion: Successfully applied render expression`)
 			return
 		}
