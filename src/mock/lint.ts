@@ -219,10 +219,6 @@ function round2(value: number): number {
 	return Math.round(value * 100) / 100
 }
 
-function round4(value: number): number {
-	return Math.round(value * 10000) / 10000
-}
-
 function sampleFramesFor(scene: MockScene, compId: string, options: SceneLintOptions): number[] {
 	const comp = scene.comps.get(compId)
 	if (!comp) return []

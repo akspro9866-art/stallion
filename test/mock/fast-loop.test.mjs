@@ -295,7 +295,7 @@ test('rollback accepts an inline state document without a prior checkpoint', asy
 })
 
 test('render_frame_fast writes a downscaled temp PNG and inlines base64 on the mock', async () => {
-	await withScene(async (handle, built) => {
+	await withScene(async (handle) => {
 		const { body: envelope } = await postJson(handle, '/render_frame_fast', {
 			seq: 'ff1',
 			frame: 12,
