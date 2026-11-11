@@ -9,6 +9,9 @@ const require = createRequire(import.meta.url)
 const pkg = require('../package.json')
 
 const production = process.env.NODE_ENV === 'production'
+// Watch is opt-in: `npm run build` must terminate so `prepare` can build dist
+// automatically on install. `npm run dev` passes --watch.
+const watchMode = process.argv.includes('--watch')
 
 const options = {
     bundle: true,
@@ -61,6 +64,9 @@ if (production) {
     await rimraf(resolve(options.outdir))
     await Promise.all([build(cavalryOptions), build(vscodeOptions), build(mockOptions)])
     await Promise.all([cavalry.dispose(), vscode.dispose(), mock.dispose()])
-} else {
+} else if (watchMode) {
     await Promise.all([cavalry.watch(), vscode.watch(), mock.watch()])
+} else {
+    await Promise.all([build(cavalryOptions), build(vscodeOptions), build(mockOptions)])
+    await Promise.all([cavalry.dispose(), vscode.dispose(), mock.dispose()])
 }

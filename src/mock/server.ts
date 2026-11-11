@@ -93,6 +93,25 @@ import { validateMgPurity, injectSceneThemeInsideUndo } from '../validation/vali
 
 // Moved to execute.ts; re-exported to keep the original public path.
 export { executeOnMock } from './execute.ts'
+// Vision-free scene lint (contrast / overlap / title-safe) re-exported for the
+// CLI and for programmatic pre-render gates.
+export {
+	lintSceneGraph,
+	lintSceneGraphAtFrame,
+	formatSceneLintReport,
+	parseColor,
+	contrastRatio,
+	relativeLuminance,
+	SCENE_LINT_BODY_CONTRAST,
+	SCENE_LINT_LARGE_CONTRAST,
+	SCENE_LINT_LARGE_TEXT_PX,
+	SCENE_LINT_TITLE_SAFE_MARGIN,
+	SCENE_LINT_OVERLAP_RATIO,
+	SCENE_LINT_SAMPLE_FRACTIONS,
+} from './lint.ts'
+export type { SceneLintFinding, SceneLintOptions, SceneLintReport, SceneLintRule } from './lint.ts'
+export { MockScene } from './scene.ts'
+export { MockApi } from './api.ts'
 export {
 	buildReceipt,
 	captureJsLogDiagnostics,

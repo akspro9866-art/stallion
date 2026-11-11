@@ -41,7 +41,8 @@
     ]
   },
   "scripts": {
-    "dev": "cross-env NODE_ENV=development npm run build",
+    "prepare": "npm run build",
+    "dev": "cross-env NODE_ENV=development node ./scripts/build.mjs --watch",
     "build": "node ./scripts/build.mjs",
     "deploy": "cross-env NODE_ENV=production npm run build && node scripts/deploy-cavalry.mjs",
     "sync-mg": "node ./scripts/sync-mg.mjs",

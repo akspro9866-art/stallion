@@ -5,6 +5,7 @@
 
 import fs from 'node:fs'
 import { MockScene, sceneDigest } from './scene.ts'
+import { lintSceneGraph, type SceneLintReport } from './lint.ts'
 
 export interface ConsoleEntry {
 	level: string
@@ -224,6 +225,8 @@ export interface ExpressionReceipt {
 	consoleDiagnostics: ConsoleEntry[]
 	jsLogDiagnostics: ConsoleEntry[]
 	beatBBoxes: Record<string, unknown>
+	/** Vision-free static scene lint (contrast / overlap / title-safe). */
+	lint: SceneLintReport
 	payloadType: ExpressionPayloadType | string
 	context: CavalryExecutionContext | 'sksl'
 	applied: string[]
@@ -238,7 +241,12 @@ export function buildReceipt(
 	consoleEntries: ConsoleEntry[],
 	receiptIds: string[],
 	beatFrames: number[],
-): { sceneStateHash: string; consoleDiagnostics: ConsoleEntry[]; beatBBoxes: Record<string, unknown> } {
+): {
+	sceneStateHash: string
+	consoleDiagnostics: ConsoleEntry[]
+	beatBBoxes: Record<string, unknown>
+	lint: SceneLintReport
+} {
 	const beatBBoxes: Record<string, unknown> = {}
 	const frames = beatFrames.slice(0, 32)
 	if (frames.length) {
@@ -271,5 +279,6 @@ export function buildReceipt(
 		sceneStateHash: sceneDigest(`nodes(${parts.join(';')})conn(${facts.connections.join(';')})`),
 		consoleDiagnostics: diagnostics,
 		beatBBoxes,
+		lint: lintSceneGraph(scene, frames.length ? { frames } : {}),
 	}
 }
