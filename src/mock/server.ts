@@ -156,8 +156,10 @@ export interface MockServerHandle {
 	host: string
 	scene: MockScene
 	api: MockApi
+	server?: http.Server
 	lastFrames: () => MockFrameBuffer[]
 	close: () => Promise<void>
+	stop?: () => Promise<void>
 }
 
 export function startMockServer(options: MockServerOptions = {}): Promise<MockServerHandle> {
@@ -1155,6 +1157,24 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		})
 	})
 
+	const activeSockets = new Set<import('node:net').Socket>()
+	server.on('connection', (socket) => {
+		activeSockets.add(socket)
+		socket.once('close', () => activeSockets.delete(socket))
+	})
+
+	const stopServer = (): Promise<void> =>
+		new Promise<void>((resolveClose) => {
+			for (const socket of activeSockets) {
+				socket.destroy()
+			}
+			activeSockets.clear()
+			if (typeof (server as unknown as { closeAllConnections?: () => void }).closeAllConnections === 'function') {
+				(server as unknown as { closeAllConnections: () => void }).closeAllConnections()
+			}
+			server.close(() => resolveClose())
+		})
+
 	return new Promise((resolve, reject) => {
 		server.once('error', reject)
 		server.listen(requestedPort, host, () => {
@@ -1165,11 +1185,10 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				host,
 				scene,
 				api,
+				server,
 				lastFrames: () => api.lastFrames.slice(),
-				close: () =>
-					new Promise<void>((resolveClose) => {
-						server.close(() => resolveClose())
-					}),
+				close: stopServer,
+				stop: stopServer,
 			})
 		})
 	})
