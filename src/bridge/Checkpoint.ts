@@ -64,23 +64,55 @@ export async function writeCheckpointManifest(
 	const content = JSON.stringify(normalizedManifest, null, 2);
 
 	await new Promise<void>((resolve, reject) => {
-		const stream = fs.createWriteStream(normalizedPath, { flags: 'w', encoding: 'utf8' });
-		stream.on('error', (err) => {
+		const stream = fs.createWriteStream(normalizedPath, { flags: 'w', encoding: 'utf8', autoClose: true });
+		let openedFd: number | undefined;
+		let settled = false;
+		const finishReject = (err: unknown) => {
+			if (settled) return;
+			settled = true;
 			reject(err);
+		};
+		stream.on('open', (fd) => {
+			openedFd = fd;
+		});
+		stream.on('error', (err) => {
+			if (!stream.closed) {
+				stream.destroy();
+			}
+			finishReject(err);
 		});
 		stream.on('finish', () => {
 			try {
-				const fd = fs.openSync(normalizedPath, 'r+');
-				fs.fsyncSync(fd);
-				fs.closeSync(fd);
-				resolve();
+				if (typeof openedFd === 'number' && !stream.closed) {
+					fs.fsyncSync(openedFd);
+				} else {
+					const fd = fs.openSync(normalizedPath, 'r+');
+					try {
+						fs.fsyncSync(fd);
+					} finally {
+						fs.closeSync(fd);
+					}
+				}
+				if (stream.closed) {
+					if (!settled) {
+						settled = true;
+						resolve();
+					}
+					return;
+				}
+				stream.close((closeErr) => {
+					if (closeErr) finishReject(closeErr);
+					else if (!settled) {
+						settled = true;
+						resolve();
+					}
+				});
 			} catch (syncErr) {
-				reject(syncErr);
+				stream.destroy();
+				finishReject(syncErr);
 			}
 		});
-		stream.write(content, () => {
-			stream.end();
-		});
+		stream.end(content, 'utf8');
 	});
 
 	return normalizedPath;

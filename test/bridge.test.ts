@@ -35,6 +35,12 @@ describe('stallion: bridge and wire tests', () => {
 		const obj = safeWrapCavalryPayload({ ok: true, data: { layerId: 'l-1' } }, 'seq-4');
 		assert.equal(obj.ok, true);
 		assert.deepEqual(obj.data, { layerId: 'l-1' });
+
+		// Error instance
+		const errEnv = safeWrapCavalryPayload(new Error('bridge timeout'), 'seq-err');
+		assert.equal(errEnv.ok, false);
+		assert.equal(errEnv.error, 'bridge timeout');
+		assert.equal(errEnv.data, null);
 	});
 
 	test('safeSerializeEnvelope and parseWirePayload roundtrip safely', () => {

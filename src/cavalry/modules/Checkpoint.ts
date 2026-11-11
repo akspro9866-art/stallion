@@ -144,7 +144,8 @@ var __num = function (v, fallback) { var n = Number(v); return isFinite(n) ? n :
 // the in-memory entry (host restart) can still restore from disk.
 var __writeFastCopy = function (snapshotId, state) {
 	try {
-		var __file = String(api.getTempFolder()) + '/stallion-checkpoint-' + String(snapshotId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) + '.cv';
+		var __temp = String(api.getTempFolder()).replace(/\\\\/g, '/').replace(/\\/+$/, '');
+		var __file = __temp + '/stallion-checkpoint-' + String(snapshotId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) + '.cv';
 		if (api.writeToFile(__file, JSON.stringify(state), true)) return __file;
 	} catch (e) {}
 	return null;

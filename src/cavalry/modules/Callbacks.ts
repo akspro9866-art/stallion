@@ -202,19 +202,40 @@ export class Callbacks {
 	/** Serve a payload on GET /get (Cavalry's WebServer serves text/plain). */
 	#serve = (payload: unknown): void => {
 		safe(() => {
-			this.#server.setResultForGet(
-				typeof payload === 'string' ? payload : JSON.stringify(payload),
-			)
+			let serialized: string
+			if (typeof payload === 'string') {
+				const trimmed = payload.trim()
+				let parsedOk = false
+				if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+					try {
+						JSON.parse(trimmed)
+						parsedOk = true
+					} catch {
+						parsedOk = false
+					}
+				}
+				serialized = parsedOk ? payload : JSON.stringify({ ok: true, rawText: payload, data: null })
+			} else if (payload instanceof Error) {
+				serialized = JSON.stringify({ ok: false, error: payload.message || String(payload), data: null })
+			} else {
+				try {
+					serialized = JSON.stringify(payload)
+				} catch (err) {
+					serialized = JSON.stringify({ ok: false, error: String(err) })
+				}
+			}
+			this.#server.setResultForGet(serialized)
 		})
 	}
 
 	/** Heartbeat served on GET /get until the first script result exists. */
 	serveStatus = (): void => {
+		const scene = safe(() => api.getSceneFilePath())
 		this.#serve({
 			kind: 'status',
 			stallion: VERSION,
 			cavalry: safe(() => api.getCavalryVersion()),
-			scene: safe(() => api.getSceneFilePath()),
+			scene: typeof scene === 'string' ? scene.replace(/\\/g, '/') : scene,
 			frame: safe(() => api.getFrame()),
 			unSaved: safe(() => api.sceneHasUnsavedChanges()),
 			capabilities: {
@@ -1078,7 +1099,8 @@ __deliver(__json);
 			} else {
 				// Temp-file fallback: same deterministic path the checkpoint wrote.
 				const safeId = snapshotId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80)
-				const tmpFile = `${safe(() => String(api.getTempFolder())) ?? ''}/stallion-checkpoint-${safeId}.cv`
+				const rawTemp = (safe(() => String(api.getTempFolder())) ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+				const tmpFile = rawTemp ? `${rawTemp}/stallion-checkpoint-${safeId}.cv` : ''
 				const raw = safe(() => (tmpFile ? (api.readFromFile(tmpFile) as string) : '')) ?? ''
 				const parsedState = safe(() => JSON.parse(raw)) as CheckpointStateDoc | null
 				if (parsedState && typeof parsedState === 'object' && Array.isArray(parsedState.layers)) state = parsedState
@@ -1123,7 +1145,7 @@ __deliver(__json);
 	#handleRenderFrameFast = (parsed: PostPayload): void => {
 		const seq = parsed.seq
 		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined
-		const tempDir = safe(() => String(api.getTempFolder())) ?? ''
+		const tempDir = (safe(() => String(api.getTempFolder())) ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 		const normalized = normalizeRenderFrameFastJob(parsed as Record<string, unknown>, tempDir)
 		if ('error' in normalized) {
 			this.#serve(errorEnvelope(RENDER_FRAME_FAST_TYPE, normalized.error.code, normalized.error.error, { seq, mgCall }))

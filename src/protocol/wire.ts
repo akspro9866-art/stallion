@@ -24,6 +24,15 @@ export function safeWrapCavalryPayload(payload: unknown, seq?: unknown): WireEnv
 	if (payload === null || payload === undefined) {
 		return { ok: true, seq: seq ?? null, data: null, rawText: '' };
 	}
+	if (payload instanceof Error) {
+		return {
+			ok: false,
+			seq: seq ?? null,
+			error: payload.message || String(payload),
+			rawText: String(payload),
+			data: null,
+		};
+	}
 	if (typeof payload === 'object') {
 		const obj = payload as Record<string, unknown>;
 		const extractedData = obj.data !== undefined ? obj.data : (obj.result !== undefined ? obj.result : obj);
