@@ -11,6 +11,10 @@ export default tseslint.config(
 			'.vscode-test/**',
 			'*.vsix',
 			'cavalry-bridge-*.vsix',
+			// Agent skills are byte-identical vendored copies (see skill-parity.mjs);
+			// linting them would demand edits that parity forbids.
+			'.qoder/skills/**',
+			'.agents/skills/**',
 		],
 	},
 	js.configs.recommended,
