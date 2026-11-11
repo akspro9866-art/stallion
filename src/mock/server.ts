@@ -65,6 +65,7 @@ import {
 	type CheckpointStateDoc,
 } from '../cavalry/modules/Checkpoint.ts'
 import { RENDER_FRAME_FAST_TYPE, normalizeRenderFrameFastJob, renderFrameFastScript } from '../cavalry/modules/RenderFast.ts'
+import { DETERMINISM_TYPE, normalizeDeterminismJob, runDeterminismCheck } from './determinism.ts'
 import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from '../cavalry/modules/mgRuntime.ts'
 import { mgHelpersPreamble } from '../cavalry/modules/Callbacks.ts'
 import {
@@ -195,6 +196,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					batchEvalAndCaptureRollback: false,
 					batchEvalAndCaptureCheckpoint: ['saveSceneAs', 'openScene', 'getSceneFilePath', 'sceneHasUnsavedChanges', 'filePathExists', 'getFileSize']
 						.every((key) => typeof (api as unknown as Record<string, unknown>)[key] === 'function'),
+					determinismCheck: true,
 					// Same shape as the live heartbeat: introspection is a `type` on POST /post,
 					// and only the mock additionally answers GET /state, /layers, /frame and the
 					// literal POST /batch-step route.
@@ -504,6 +506,35 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		return envelope
 	}
 
+	/**
+	 * determinism-check evaluates a submitted frame function across the 7
+	 * evaluation orders in isolated vm sandboxes (the scene is never touched)
+	 * and answers with the DeterminismReport plus the standard receipt. The
+	 * static lint is the purity gate for this surface: a failed lint makes the
+	 * envelope ok:false even when every order agrees, and the 7-order check is
+	 * the authority on frame-order state the lint only warns about.
+	 */
+	const handleDeterminismPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		const normalized = normalizeDeterminismJob(parsed)
+		if ('error' in normalized) {
+			return errorEnvelope(DETERMINISM_TYPE, normalized.code, normalized.error, {
+				seq,
+				mgCall: typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined,
+			})
+		}
+		const report = runDeterminismCheck(normalized.job)
+		const receipt = buildReceipt(scene, report.consoleDiagnostics, [], [])
+		return {
+			type: RESULT_TYPE,
+			kind: DETERMINISM_TYPE,
+			seq,
+			ok: report.deterministic && report.lint.passed,
+			...report,
+			receipt,
+		}
+	}
+
 	const handleScriptPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
 		const seq = parsed.seq ?? null
 		const rawCode = typeof parsed.code === 'string' ? parsed.code : ''
@@ -697,7 +728,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				const body =
 					'Stallion mock bridge — POST /post, GET /get, GET /health, POST /execute, POST /render-frames, POST /batch-step, ' +
 					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch, ' +
-					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast\n'
+					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast, /determinism-check\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
@@ -837,6 +868,38 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					}
 				}
 				const envelope = handleBatchStepPost(parsed)
+				lastPayload = envelope
+				serveJson(response, envelope)
+				return
+			}
+			// Literal determinism-check route: mock-only, like /batch-step. The
+			// live bridge multiplexes it as a `type` on POST /post; the mock also
+			// answers the path-shaped form with the identical envelope, directly
+			// rather than ack-then-poll. A JSON body is merged over the query.
+			if (url.pathname === '/determinism-check' && (request.method === 'POST' || request.method === 'GET')) {
+				const q = url.searchParams
+				let parsed: Record<string, unknown> = {
+					seq: q.get('seq') ?? `determinism-check-${Date.now()}`,
+				}
+				if (q.get('code') !== null) parsed.code = q.get('code')
+				if (q.get('frames') !== null) parsed.frames = (q.get('frames') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+				if (q.get('frameCount') !== null) parsed.frameCount = q.get('frameCount')
+				if (q.get('seed') !== null) parsed.seed = q.get('seed')
+				if (q.get('width') !== null) parsed.width = q.get('width')
+				if (q.get('budgetMs') !== null) parsed.budgetMs = q.get('budgetMs')
+				if (/^(0|false|no)$/i.test(q.get('lint') ?? '')) parsed.lint = false
+				if (request.method === 'POST') {
+					try {
+						const raw = await readBody(request)
+						if (raw.trim()) parsed = { ...parsed, ...(JSON.parse(raw) as Record<string, unknown>) }
+					} catch (err) {
+						const message = String((err as Error)?.message ?? err)
+						const status = /too large/i.test(message) ? 413 : 400
+						serveJson(response, errorEnvelope(DETERMINISM_TYPE, ERROR_CODES.BAD_REQUEST, message), status)
+						return
+					}
+				}
+				const envelope = handleDeterminismPost(parsed)
 				lastPayload = envelope
 				serveJson(response, envelope)
 				return
@@ -994,6 +1057,9 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === RENDER_FRAME_FAST_TYPE) {
 						envelope = handleRenderFrameFastPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === DETERMINISM_TYPE) {
+						envelope = handleDeterminismPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === 'health') {
 						envelope = {

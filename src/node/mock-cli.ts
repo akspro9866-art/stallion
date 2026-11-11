@@ -31,6 +31,22 @@ import {
 	type MockServerHandle,
 	type MockServerOptions,
 } from '../mock/server.ts'
+import {
+	DETERMINISM_TYPE,
+	DETERMINISM_ORDERS,
+	DETERMINISM_MAX_PROBES,
+	DETERMINISM_MAX_FRAME_COUNT,
+	DETERMINISM_MAX_CODE_BYTES,
+	lintDeterminismSource,
+	normalizeDeterminismJob,
+	runDeterminismCheck,
+	type DeterminismJob,
+	type DeterminismLintResult,
+	type DeterminismLintViolation,
+	type DeterminismMismatch,
+	type DeterminismOrder,
+	type DeterminismReport,
+} from '../mock/determinism.ts'
 
 export {
 	bootMockFromArgv,
@@ -46,6 +62,14 @@ export {
 	startMockServer,
 	validateCavalryContextUsage,
 	validateSkslSource,
+	DETERMINISM_TYPE,
+	DETERMINISM_ORDERS,
+	DETERMINISM_MAX_PROBES,
+	DETERMINISM_MAX_FRAME_COUNT,
+	DETERMINISM_MAX_CODE_BYTES,
+	lintDeterminismSource,
+	normalizeDeterminismJob,
+	runDeterminismCheck,
 }
 export type {
 	CavalryExecutionContext,
@@ -54,6 +78,12 @@ export type {
 	ExpressionReceipt,
 	MockServerHandle,
 	MockServerOptions,
+	DeterminismJob,
+	DeterminismLintResult,
+	DeterminismLintViolation,
+	DeterminismMismatch,
+	DeterminismOrder,
+	DeterminismReport,
 }
 
 const invokedDirectly = (() => {
