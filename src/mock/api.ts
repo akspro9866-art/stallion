@@ -39,6 +39,8 @@ export class MockApi {
 	scene: MockScene
 	options: MockApiOptions
 	lastFrames: MockFrameBuffer[] = []
+	/** Most recent scene mutation (set/connect destination) for structured error telemetry. */
+	lastMutation: { layerId: string; attrPath: string } | null = null
 	#sceneFilePath: string | null = null
 
 	constructor(scene: MockScene, options: MockApiOptions = {}) {
@@ -100,6 +102,7 @@ export class MockApi {
 	set(id: string, attrs: Record<string, unknown>): void {
 		const layer = this.#require(id)
 		for (const [attrPath, value] of Object.entries(attrs ?? {})) {
+			this.lastMutation = { layerId: layer.id, attrPath: String(attrPath) }
 			this.scene.setAttr(layer, attrPath, value)
 			// Keep dynamic attribute aliases in step (rawName, array.<name>, dynamic.<name>, uniforms.<name>).
 			const rawName = attrPath.replace(/^(array|dynamic|uniforms)\./, '')
@@ -192,6 +195,7 @@ export class MockApi {
 			this.scene.warn(`connect: unknown target attribute ${dst.id}.${dstAttr}`)
 		}
 		this.scene.connect(src.id, String(srcAttr), dst.id, String(dstAttr), force === true)
+		this.lastMutation = { layerId: dst.id, attrPath: String(dstAttr) }
 	}
 
 	parent(id: string, parentId: string): void {

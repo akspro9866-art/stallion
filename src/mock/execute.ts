@@ -5,13 +5,41 @@
 import vm from 'node:vm'
 import { MockApi } from './api.ts'
 import { type ConsoleEntry } from './receipt.ts'
+import { buildStructuredError, type LastMutation, type StructuredError } from './structured-error.ts'
+
+export interface ExecuteOnMockOptions {
+	verbose?: boolean
+	context?: vm.Context
+	/**
+	 * The caller-facing user script (without any `_mg` preamble). When given,
+	 * structured-error coordinates and snippets are reported relative to it;
+	 * defaults to the evaluated `code` itself.
+	 */
+	userCode?: string
+	/**
+	 * Number of lines prepended ahead of the user code inside the evaluated
+	 * `code` argument (e.g. the `helpers: true` `_mg` preamble), so engine
+	 * stack coordinates can be shifted back onto the original user script.
+	 */
+	userCodeOffsetLines?: number
+}
+
+export interface ExecuteOnMockResult {
+	result: unknown
+	error: string | null
+	stack: string | null
+	console: ConsoleEntry[]
+	state: Record<string, unknown>
+	/** Structured IIFE exception telemetry — null on success. */
+	diagnostics: StructuredError | null
+}
 
 /** Execute script code against the mock scene in a fresh vm context. */
 export function executeOnMock(
 	code: string,
 	api: MockApi,
-	options: { verbose?: boolean; context?: vm.Context } = {},
-): { result: unknown; error: string | null; stack: string | null; console: ConsoleEntry[]; state: Record<string, unknown> | null } {
+	options: ExecuteOnMockOptions = {},
+): ExecuteOnMockResult {
 	const entries: ConsoleEntry[] = []
 	const sandboxConsole = {
 		log: (...args: unknown[]) => entries.push({ level: 'log', text: args.map(String).join(' ') }),
@@ -23,11 +51,18 @@ export function executeOnMock(
 	const trimmed = isAtomic ? code : `(function () {
 		if (typeof api.startUndoGroup === 'function') api.startUndoGroup('AI Motion Batch');
 		try {
-			return (function () { ${code}\n})();
+			return (function () { ${code}
+})();
 		} finally {
 			if (typeof api.endUndoGroup === 'function') api.endUndoGroup();
 		}
 	})()`
+	// Locate the start of the evaluated `code` inside `trimmed` so engine stack
+	// coordinates can be reported user-relative by the structured error harness.
+	const codeStartIndex = code.length > 0 ? Math.max(0, trimmed.indexOf(code)) : 0
+	const beforeCode = trimmed.slice(0, codeStartIndex)
+	const codeStartLine = beforeCode.split('\n').length
+	const codeStartColumn = codeStartIndex - beforeCode.lastIndexOf('\n')
 	const before = new Set(api.scene.layers.keys())
 	const sandbox: Record<string, unknown> = {
 		api,
@@ -48,6 +83,7 @@ export function executeOnMock(
 	let result: unknown
 	let error: string | null = null
 	let stack: string | null = null
+	let diagnostics: StructuredError | null = null
 	try {
 		if (options.context) {
 			// Persistent preloaded context (preloadMg: true): the sandbox global
@@ -69,6 +105,18 @@ export function executeOnMock(
 		const e = err as Error
 		error = String(e?.message ?? e)
 		stack = e?.stack ?? null
+		const userCode = options.userCode ?? code
+		const offsetLines = options.userCodeOffsetLines ?? 0
+		const lastMutation: LastMutation | null = api.lastMutation ? { ...api.lastMutation } : null
+		const structured = buildStructuredError(e, userCode, codeStartLine + offsetLines, codeStartColumn, stack, lastMutation)
+		// Coordinates outside the user script (e.g. thrown inside the preamble)
+		// stay null rather than negative garbage.
+		if (structured.lineOffset !== null && structured.lineOffset < 1) {
+			structured.lineOffset = null
+			structured.columnOffset = null
+			structured.snippet = null
+		}
+		diagnostics = structured
 	}
 	if (options.verbose && entries.length) {
 		for (const entry of entries) process.stderr.write(`[mock:${entry.level}] ${entry.text}\n`)
@@ -107,8 +155,11 @@ export function executeOnMock(
 		durationMs: 0,
 		writtenAt: new Date().toISOString(),
 	}
+	if (diagnostics) {
+		state.structuredError = diagnostics
+	}
 	if (api.scene.diagnostics.length) {
 		;(state as Record<string, unknown>).diagnostics = api.scene.diagnostics.slice()
 	}
-	return { result, error, stack, console: entries, state }
+	return { result, error, stack, console: entries, state, diagnostics }
 }

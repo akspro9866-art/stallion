@@ -63,6 +63,7 @@ import {
 	type CheckpointStateDoc,
 } from './Checkpoint.ts'
 import { RENDER_FRAME_FAST_TYPE, normalizeRenderFrameFastJob, renderFrameFastScript } from './RenderFast.ts'
+import { SCENE_HASH_TYPE, SCENE_HASH_SCRIPT } from './SceneHash.ts'
 import { MG_HELPERS_SOURCE, MG_MANIFEST_RUNTIME } from './mgRuntime.ts'
 import {
 	ERROR_CODES,
@@ -250,12 +251,14 @@ export class Callbacks {
 					.every((key) => typeof (api as unknown as Record<string, unknown>)[key] === 'function'),
 				// Introspection rides on POST /post as `type`, not as URL routes: Cavalry's
 				// WebServer serves exactly /get and /post. See Introspect.ts.
-				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
-				// `_mg`/`_rb` + the declarative manifest interpreter are preloaded at
-				// startup, so batch-step and helpers:true scripts carry no runtime bytes.
-				mgRuntime: true,
-				errorEnvelope: 1,
-				mock: false,
+				introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', SCENE_HASH_TYPE, BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
+					// `_mg`/`_rb` + the declarative manifest interpreter are preloaded at
+					// startup, so batch-step and helpers:true scripts carry no runtime bytes.
+					mgRuntime: true,
+					errorEnvelope: 1,
+					sceneHash: true,
+					sceneHashAlgorithm: 'fnv1a-32x2',
+					mock: false,
 			},
 			ts: Date.now(),
 		})
@@ -364,6 +367,11 @@ export class Callbacks {
 			this.#handleRenderFrameFast(parsed)
 			return
 		}
+		// Fast deterministic scene-tree checksum — digest only, never the full graph.
+		if (parsed.type === SCENE_HASH_TYPE) {
+			this.#handleSceneHash(parsed)
+			return
+		}
 		if (parsed.type === 'health') {
 			this.#serve({
 				version: VERSION,
@@ -439,15 +447,18 @@ export class Callbacks {
 				return
 			}
 			if (code) {
-				const body =
-					parsed.helpers === true && !code.includes('const _mg')
-						? `${mgHelpersPreamble(MG_HELPERS_SOURCE)}\n${code}`
-						: code
+				const usedPreamble = parsed.helpers === true && !code.includes('const _mg')
+				const preambleSource = usedPreamble ? mgHelpersPreamble(MG_HELPERS_SOURCE) : ''
+				const body = usedPreamble ? `${preambleSource}\n${code}` : code
 				const success = api.exec(
 					SCRIPT_ID,
 					this.#wrapped(body, seq, statePath, {
 						beatFrames: parsed.beatFrames,
 						diagnostics: parsed.diagnostics === true,
+						// Structured-error coordinates and snippets are reported against
+						// the caller's original script, not the composed preamble.
+						userCode: code,
+						userCodeOffsetLines: usedPreamble ? preambleSource.split('\n').length : 0,
 					}),
 				)
 				this.#serveStashed(seq)
@@ -560,12 +571,16 @@ export class Callbacks {
 		code: string,
 		seq: unknown,
 		statePath?: string,
-		options?: { beatFrames?: unknown; diagnostics?: boolean },
+		options?: { beatFrames?: unknown; diagnostics?: boolean; userCode?: string; userCodeOffsetLines?: number },
 	): string => {
 		const origin = `http://${this.#config.host}:${this.#config.port}`
 		const token = this.#config.token
 		const seqLiteral = JSON.stringify(seq) ?? 'undefined'
 		const statePathLiteral = JSON.stringify(statePath ?? '')
+		// Structured-error base: the caller-facing user script and how many
+		// preamble lines sit ahead of it inside the evaluated body.
+		const userCode = options?.userCode ?? code
+		const preambleLines = options?.userCodeOffsetLines ?? 0
 		const isAtomic = code.startsWith('/* cavalry-mcp:atomic */')
 		const atomic = isAtomic
 			? code
@@ -703,7 +718,7 @@ export class Callbacks {
 	}
 })();`
 				: ''
-		return `(function () {
+		const wrapperSource = `(function () {
 // seq is caller-controlled and may be reused; telemetry must be per invocation.
 try { globalThis.__stallionState = undefined; } catch (e) {}
 var __apiSetDescriptor = Object.getOwnPropertyDescriptor(api, 'set');
@@ -751,17 +766,77 @@ var __consoleRestore = (function () {
 	};
 })();
 var __diag = { invalidAttrs: [], failedConnections: [] };
+var __stallionUserCode = ${JSON.stringify(userCode)};
+var __lastWrite = null;
+var __recordApiWrites = (function () {
+	if (typeof api === 'undefined') return;
+	try {
+		var origSet = api.set;
+		if (typeof origSet === 'function') {
+			api.set = function (id, attrs) {
+				try {
+					if (attrs && typeof attrs === 'object') {
+						var names = Object.keys(attrs);
+						if (names.length) __lastWrite = { layerId: String(id), attrPath: String(names[names.length - 1]) };
+					}
+				} catch (e) {}
+				return origSet.apply(api, arguments);
+			};
+		}
+		var origConnect = api.connect;
+		if (typeof origConnect === 'function') {
+			api.connect = function (srcId, srcAttr, dstId, dstAttr) {
+				try { __lastWrite = { layerId: String(dstId), attrPath: String(dstAttr) }; } catch (e) {}
+				return origConnect.apply(api, arguments);
+			};
+		}
+	} catch (e) {}
+})();
 ${diagnosticsProbes}
 var __out = { type: ${JSON.stringify(RESULT_TYPE)}, kind: 'result', seq: ${seqLiteral}, ok: true };
 try {
 	var __result;
-	var __returned = ${atomic};
+	var __returned = (/*__STALLION_EMBED__*/${atomic});
 	if (typeof __result === 'undefined') __result = __returned;
 	if (typeof __result !== 'undefined') __out.result = __result;
 } catch (err) {
 	__out.ok = false;
 	__out.error = err.toString();
 	__out.stack = err.stack;
+	// Structured IIFE exception telemetry: machine-readable coordinates
+	// against the caller's ORIGINAL script (wrapper/preamble subtracted),
+	// failing snippet, error classification and last mutated layer/attr.
+	var __seRawLine = null, __seRawCol = null;
+	try {
+		var __seMatch = /:(\\d+):(\\d+)/.exec(String(err.stack || ''));
+		if (__seMatch) { __seRawLine = Number(__seMatch[1]); __seRawCol = Number(__seMatch[2]); }
+	} catch (seErr) {}
+	if (__seRawLine != null && __seRawCol != null) {
+		var __seRelUser = __seRawLine - (__STALLION_START_LINE__ - 1) - __STALLION_PREAMBLE_LINES__;
+		if (__seRelUser >= 1 && __seRelUser <= __STALLION_USER_LINES__) {
+			__out.lineOffset = __seRelUser;
+			__out.columnOffset = __seRelUser === 1 ? __seRawCol - (__STALLION_START_COL__ - 1) : __seRawCol;
+			try {
+				var __seLines = __stallionUserCode.split(/\\r\\n|\\r|\\n/);
+				var __seTarget = __seLines[__seRelUser - 1];
+				if (typeof __seTarget === 'string') {
+					var __seTrim = __seTarget.length > 200 ? __seTarget.slice(0, 197) + '...' : __seTarget;
+					var __seCol = __out.columnOffset;
+					if (typeof __seCol === 'number' && __seCol >= 1 && __seCol <= __seTarget.length + 1) {
+						var __sePad = '';
+						for (var __seP = 1; __seP < __seCol && __seP <= __seTrim.length; __seP++) __sePad += ' ';
+						__out.snippet = __seTrim + '\\n' + __sePad + '^';
+					} else {
+						__out.snippet = __seTrim;
+					}
+				}
+			} catch (snipErr) {}
+		}
+	}
+	__out.errorType = (err && err.name && err.name !== 'Error') ? String(err.name) : (/SyntaxError|Unexpected|Invalid|unexpected token/i.test(String(err)) ? 'SyntaxError' : 'Error');
+	__out.message = (err && err.message != null) ? String(err.message) : String(err);
+	__out.lastLayerId = __lastWrite ? __lastWrite.layerId : null;
+	__out.lastAttributePath = __lastWrite ? __lastWrite.attrPath : null;
 	if (__state) { __state.status = 'error'; __state.errorStack = String(err.stack || err); }
 } finally {
 	try { __consoleRestore(); } catch (e) {}
@@ -794,6 +869,22 @@ try { __json = JSON.stringify(__out); } catch (e2) {
 }
 __deliver(__json);
 })()`
+		// Pin the exact user-code coordinates for the structured exception
+		// telemetry: locate the sentinel that marks where the evaluated body
+		// begins inside the composed wrapper, then substitute the pre-computed
+		// literals into the catch block above.
+		const sentinelToken = '/*__STALLION_EMBED__*/'
+		const sentinelIndex = wrapperSource.indexOf(sentinelToken)
+		const embedIndex = sentinelIndex >= 0 ? sentinelIndex + sentinelToken.length : 0
+		const prefixToCode = wrapperSource.slice(0, embedIndex)
+		const codeStartLine = prefixToCode.split('\n').length
+		const codeStartColumn = embedIndex - prefixToCode.lastIndexOf('\n')
+		const userLineCount = userCode.split(/\r\n|\r|\n/).length
+		return wrapperSource
+			.replace('__STALLION_START_LINE__', String(codeStartLine))
+			.replace('__STALLION_START_COL__', String(codeStartColumn))
+			.replace('__STALLION_PREAMBLE_LINES__', String(preambleLines))
+			.replace('__STALLION_USER_LINES__', String(userLineCount))
 	}
 
 	/**
@@ -1142,6 +1233,19 @@ __deliver(__json);
 	 * request is acknowledged with the fast local file path plus a note, and
 	 * the mock bridge is the surface that returns `pngBase64`.
 	 */
+	#handleSceneHash = (parsed: PostPayload): void => {
+		const seq = parsed.seq
+		const success = api.exec(SCRIPT_ID, this.#wrapped(SCENE_HASH_SCRIPT, seq))
+		this.#serveReshaped(seq, (doc) => {
+			const inner = typeof doc.result === 'object' && doc.result !== null ? (doc.result as Record<string, unknown>) : {}
+			return { type: RESULT_TYPE, kind: SCENE_HASH_TYPE, seq: doc.seq, ok: doc.ok === true && inner.ok !== false, ...inner }
+		})
+		if (!success) {
+			this.#serve(errorEnvelope(SCENE_HASH_TYPE, ERROR_CODES.EXEC_FAILED, 'scene_hash failed to execute in the Cavalry script host.', { seq }))
+			console.error('Stallion: scene_hash failed to execute')
+		}
+	}
+
 	#handleRenderFrameFast = (parsed: PostPayload): void => {
 		const seq = parsed.seq
 		const mgCall = typeof parsed.mgCall === 'string' ? parsed.mgCall : undefined

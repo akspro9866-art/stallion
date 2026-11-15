@@ -25,6 +25,9 @@ import fs from 'node:fs'
 import { createHash } from 'node:crypto'
 import { MockApi, type MockFrameBuffer } from './api.ts'
 import { MockScene } from './scene.ts'
+import { computeSceneHash, SCENE_HASH_ALGORITHM } from './scene-hash.ts'
+import { SCENE_HASH_TYPE } from '../cavalry/modules/SceneHash.ts'
+import { RequestQueue } from './request-queue.ts'
 import { encodePng, rasterizeFrame } from './raster.ts'
 import {
 	ERROR_CODES,
@@ -93,6 +96,9 @@ import { validateMgPurity, injectSceneThemeInsideUndo } from '../validation/vali
 
 // Moved to execute.ts; re-exported to keep the original public path.
 export { executeOnMock } from './execute.ts'
+export { RequestQueue } from './request-queue.ts'
+export { buildStructuredError, classifyErrorType, parseStackLocation } from './structured-error.ts'
+export { computeSceneHash, sceneHashFacts, SCENE_HASH_ALGORITHM } from './scene-hash.ts'
 // Vision-free scene lint (contrast / overlap / title-safe) re-exported for the
 // CLI and for programmatic pre-render gates.
 export {
@@ -133,12 +139,17 @@ export const MOCK_VERSION = '0.11.0'
 const RESULT_TYPE = '__stallion_result__'
 const RENDER_FRAMES_TYPE = 'render-frames'
 const MAX_INLINE_FRAMES = 64
+const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000
 
 export interface MockServerOptions {
 	host?: string
 	port?: number
 	token?: string
 	strictSchema?: boolean
+	/** Per-request FIFO queue ceiling in milliseconds (default 30_000). */
+	requestTimeoutMs?: number
+	/** HTTP keep-alive idle timeout in milliseconds (default 5_000). */
+	keepAliveTimeoutMs?: number
 	/** Echo captured console output to stderr (debugging aid, off in CI). */
 	verbose?: boolean
 	/**
@@ -166,12 +177,19 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 	const host = options.host ?? process.env.STALLION_HOST ?? '127.0.0.1'
 	const requestedPort = options.port ?? (Number(process.env.STALLION_PORT) || 8080)
 	const token = options.token ?? process.env.STALLION_TOKEN ?? ''
+	const keepAliveTimeoutMs = options.keepAliveTimeoutMs ?? DEFAULT_KEEP_ALIVE_TIMEOUT_MS
 	const scene = new MockScene({ strictSchema: options.strictSchema !== false })
 	const api = new MockApi(scene, {
 		render: (s, compId, frame, width, height) => rasterizeFrame(s, compId, frame, width, height),
 	})
 	let lastPayload: Record<string, unknown> | null = null
-	const queue: Promise<void> = Promise.resolve()
+	// FIFO execution queue: every POST /post unit of work is serialised through
+	// one tail and bounded by a configurable per-request timeout, so heavy
+	// FFmpeg frame exports or multi-frame evaluations can never drop, reorder or
+	// block subsequent single-shot IIFE calls. (The previous `const queue`
+	// chained every request off one already-resolved promise, i.e. it queued
+	// nothing.)
+	const queue = new RequestQueue({ timeoutMs: options.requestTimeoutMs })
 
 	// preloadMg: one persistent vm context carrying the `_mg`/`_rb` startup
 	// preload, so scripts and batch-steps run exactly the preload branch a live
@@ -221,18 +239,38 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					// Same shape as the live heartbeat: introspection is a `type` on POST /post,
 					// and only the mock additionally answers GET /state, /layers, /frame and the
 					// literal POST /batch-step route.
-					introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
-				mgRuntime: true,
-				errorEnvelope: 1,
-				mock: true,
+					introspect: ['state', 'layers', 'snapshot', 'snapshot-batch', SCENE_HASH_TYPE, BATCH_STEP_TYPE, BATCH_INSPECT_TYPE, EXPORT_COMP_RIG_OVERRIDES_TYPE, CHECKPOINT_TYPE, ROLLBACK_TYPE, RENDER_FRAME_FAST_TYPE],
+					mgRuntime: true,
+					errorEnvelope: 1,
+					sceneHash: true,
+					sceneHashAlgorithm: SCENE_HASH_ALGORITHM,
+					mock: true,
 			},
 		ts: Date.now(),
 	})
 
+	// HTTP keep-alive: reuse connections across bursts of single-shot calls and
+	// frame exports. The advertised idle ceiling matches the server's configured
+	// keepAliveTimeout so well-behaved agents can pool sockets accordingly.
+	const keepAliveSeconds = Math.max(1, Math.round(keepAliveTimeoutMs / 1000))
 	const serveJson = (response: http.ServerResponse, payload: unknown, status = 200): void => {
 		const body = JSON.stringify(payload)
-		response.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+		response.writeHead(status, {
+			'Content-Type': 'application/json',
+			'Content-Length': Buffer.byteLength(body),
+			Connection: 'keep-alive',
+			'Keep-Alive': `timeout=${keepAliveSeconds}`,
+		})
 		response.end(body)
+	}
+
+	// Fast deterministic scene-tree checksum: FNV-1a over the active comp's
+	// layer ids (hierarchy order) and connected behaviour attribute values.
+	// Nothing but the digest crosses HTTP — the full scene graph never does.
+	// Wire-faithful with the live bridge: identical envelope shape.
+	const handleSceneHashPost = (parsed: Record<string, unknown>): Record<string, unknown> => {
+		const seq = parsed.seq ?? null
+		return { type: RESULT_TYPE, kind: SCENE_HASH_TYPE, seq, ok: true, ...computeSceneHash(api, scene) }
 	}
 
 	const handleRenderFrames = async (parsed: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -570,12 +608,18 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		}
 		// helpers:true gets the identical preamble the live bridge injects, so a
 		// compact `_mg` script behaves the same on both surfaces.
-		const code =
-			parsed.helpers === true && !rawCode.includes('const _mg')
-				? `${mgHelpersPreamble(MG_HELPERS_SOURCE)}\n${rawCode}`
-				: rawCode
+		const usePreamble = parsed.helpers === true && !rawCode.includes('const _mg')
+		const preambleSource = usePreamble ? mgHelpersPreamble(MG_HELPERS_SOURCE) : ''
+		const code = usePreamble ? `${preambleSource}\n${rawCode}` : rawCode
 		const beatFrames = Array.isArray(parsed.beatFrames) ? parsed.beatFrames.map((f) => Math.round(Number(f))).filter((f) => Number.isFinite(f)) : []
-		const ran = executeOnMock(code, api, { verbose: options.verbose, context: persistentContext ?? undefined })
+		const ran = executeOnMock(code, api, {
+			verbose: options.verbose,
+			context: persistentContext ?? undefined,
+			// Structured-error coordinates/snippets are reported against the
+			// caller's original script, not the composed preamble + wrapper.
+			userCode: rawCode,
+			userCodeOffsetLines: usePreamble ? preambleSource.split('\n').length : 0,
+		})
 		const receiptIds = [
 			...new Set([...((ran.state.createdLayerIds as string[]) ?? []), ...((ran.state.activeSelection as string[]) ?? [])]),
 		]
@@ -592,6 +636,18 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 		if (ran.error !== null) {
 			envelope.error = ran.error
 			envelope.stack = ran.stack
+			// Structured IIFE exception telemetry: machine-readable failure
+			// coordinates (user-relative line/column), failing snippet and the
+			// last layer/attribute the script managed to mutate.
+			if (ran.diagnostics) {
+				envelope.errorType = ran.diagnostics.errorType
+				envelope.message = ran.diagnostics.message
+				envelope.lineOffset = ran.diagnostics.lineOffset
+				envelope.columnOffset = ran.diagnostics.columnOffset
+				envelope.lastLayerId = ran.diagnostics.lastLayerId
+				envelope.lastAttributePath = ran.diagnostics.lastAttributePath
+				envelope.snippet = ran.diagnostics.snippet
+			}
 		} else if (typeof ran.result !== 'undefined') {
 			envelope.result = ran.result
 		}
@@ -749,7 +805,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				const body =
 					'Stallion mock bridge — POST /post, GET /get, GET /health, POST /execute, POST /render-frames, POST /batch-step, ' +
 					'GET|POST /state, /layers, /frame, /snapshot, /snapshot-batch, ' +
-					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast, /determinism-check\n'
+					'/batch_inspect, /export_comp_rig_overrides, /checkpoint, /rollback, /render_frame_fast, /determinism-check, /scene_hash\n'
 				response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) })
 				response.end(body)
 				return
@@ -925,6 +981,18 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 				serveJson(response, envelope)
 				return
 			}
+			// Literal scene-hash route: mock-only, like /batch-step and
+			// /determinism-check. The live bridge multiplexes it as a `type` on
+			// POST /post; the mock also answers the path-shaped form with the
+			// identical envelope, directly rather than ack-then-poll.
+			if (url.pathname === '/scene_hash' && (request.method === 'GET' || request.method === 'POST')) {
+				const q = url.searchParams
+				const parsed: Record<string, unknown> = { seq: q.get('seq') ?? `scene-hash-${Date.now()}` }
+				const envelope = handleSceneHashPost(parsed)
+				lastPayload = envelope
+				serveJson(response, envelope)
+				return
+			}
 			if (request.method === 'GET' && url.pathname === '/get') {
 				serveJson(response, lastPayload ?? heartbeat())
 				return
@@ -1038,7 +1106,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 					response.end(payload)
 					return
 				}
-				const work = queue.then(async () => {
+				const work = queue.enqueue(async () => {
 					let envelope: Record<string, unknown>
 					if (parsed.type === RESULT_TYPE) {
 						// internal loopback channel — serve verbatim, like the live bridge
@@ -1081,6 +1149,9 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 						lastPayload = envelope
 					} else if (parsed.type === DETERMINISM_TYPE) {
 						envelope = handleDeterminismPost(parsed)
+						lastPayload = envelope
+					} else if (parsed.type === SCENE_HASH_TYPE) {
+						envelope = handleSceneHashPost(parsed)
 						lastPayload = envelope
 					} else if (parsed.type === 'health') {
 						envelope = {
@@ -1156,6 +1227,13 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 			if (!response.headersSent) serveJson(response, { error: 'internal error' }, 500)
 		})
 	})
+
+	// Keep-alive tuning: idle sockets are reusable for STALLION_KEEP_ALIVE…
+	// milliseconds and headers must arrive within twice that, so bursty
+	// single-shot clients pooling one connection are never dropped mid-burst.
+	server.keepAliveTimeout = keepAliveTimeoutMs
+	server.headersTimeout = Math.max(60_000, keepAliveTimeoutMs * 2)
+	server.requestTimeout = 0 // bounded per-request by the FIFO queue instead
 
 	const activeSockets = new Set<import('node:net').Socket>()
 	server.on('connection', (socket) => {

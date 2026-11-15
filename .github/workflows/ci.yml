@@ -3,15 +3,30 @@ name: CI
 # The bridge is pure esbuild output — the protocol suite loads dist/Stallion.js
 # into a vm sandbox with a mock api, and the mock-bridge suite runs the
 # dist/stallion-mock.mjs HTTP server. Neither needs Cavalry or VS Code, so the
-# matrix covers both OSes across the supported Node range. The VS Code
+# matrix covers every OS across the supported Node range. The VS Code
 # extension-host suite stays out of CI (it needs a downloaded Electron build);
 # run it locally with `npm run test:vscode`.
+#
+# The headless build-test job runs unconditionally on every push and pull
+# request: the trigger block deliberately carries no branch or path filters so
+# a push to any branch can never produce a zero-job run. Everything that needs
+# a live Cavalry 2.8.0 instance on port 8080 lives in the dedicated
+# live-cavalry job, which is workflow_dispatch-only and additionally requires
+# the explicit CAVALRY_LIVE=true environment gate honoured by
+# scripts/live-preflight.mjs (process.env.CAVALRY_LIVE === 'true'). Hosted
+# runners never talk to port 8080: the headless matrix runs strictly against
+# the deterministic mock bridge.
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+
+env:
+  # Opt-in gate for live-Cavalry work, sourced from a repository variable so
+  # forks stay headless by default. The live-cavalry job re-asserts it
+  # explicitly on workflow_dispatch runs.
+  CAVALRY_LIVE: ${{ vars.CAVALRY_LIVE || 'false' }}
 
 jobs:
   build-test:
@@ -19,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +44,27 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:ci
-      # No live suite exists yet. test:live deliberately fails preflight; do not
-      # advertise a self-hosted workflow that merely reruns these mock tests.
+
+  # Manual-only live integration: needs a real Cavalry 2.8.0 app exposing the
+  # bridge on port 8080, so it runs exclusively on workflow_dispatch and only
+  # when the CAVALRY_LIVE environment gate is 'true' (repository variable).
+  # Trigger from the Actions tab after setting CAVALRY_LIVE=true.
+  live-cavalry:
+    if: github.event_name == 'workflow_dispatch' && env.CAVALRY_LIVE == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CAVALRY_LIVE: 'true'
+      STALLION_HOST: 127.0.0.1
+      STALLION_PORT: '8080'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Live bridge preflight (requires a reachable Cavalry instance)
+        run: npm run test:live
 
   # Manual-only extension-host suite: downloads Electron, so it never runs on
   # push/PR and is not part of the required matrix. Trigger from the Actions tab.

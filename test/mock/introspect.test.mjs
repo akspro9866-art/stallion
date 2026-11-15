@@ -84,6 +84,7 @@ test('heartbeat advertises introspection and the error envelope', async () => {
 			'layers',
 			'snapshot',
 			'snapshot-batch',
+			'scene_hash',
 			'batch-step',
 			'batch_inspect',
 			'export_comp_rig_overrides',
@@ -92,6 +93,7 @@ test('heartbeat advertises introspection and the error envelope', async () => {
 			'render_frame_fast',
 		])
 		assert.equal(status.capabilities.errorEnvelope, 1)
+		assert.equal(status.capabilities.sceneHash, true)
 		assert.equal(status.capabilities.mock, true)
 	} finally {
 		await handle.close()
