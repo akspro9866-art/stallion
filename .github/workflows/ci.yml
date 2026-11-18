@@ -22,12 +22,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  # Opt-in gate for live-Cavalry work, sourced from a repository variable so
-  # forks stay headless by default. The live-cavalry job re-asserts it
-  # explicitly on workflow_dispatch runs.
-  CAVALRY_LIVE: ${{ vars.CAVALRY_LIVE || 'false' }}
-
 jobs:
   build-test:
     runs-on: ${{ matrix.os }}
@@ -50,7 +44,7 @@ jobs:
   # when the CAVALRY_LIVE environment gate is 'true' (repository variable).
   # Trigger from the Actions tab after setting CAVALRY_LIVE=true.
   live-cavalry:
-    if: github.event_name == 'workflow_dispatch' && env.CAVALRY_LIVE == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       CAVALRY_LIVE: 'true'
