@@ -114,7 +114,7 @@ inside Cavalry beyond Stallion itself.
 | Project | Role |
 | --- | --- |
 | **Stallion** (this repository) | HTTP bridge inside Cavalry, VS Code sender, headless mock |
-| [cavalry-mcp](https://github.com/akspro9866-art/cavalry-mcp) | MCP server that batches `_mg` scripts and talks to this bridge |
+| [cavalry-mcp](https://github.com/akspro9866-art/ultra-cavalry-mcp) | MCP server that batches `_mg` scripts and talks to this bridge |
 | [refclone](https://github.com/akspro9866-art/refclone) | Reference-video reproduction pipeline; uses cavalry-mcp and a read-only Stallion client for frame evidence |
 
 ## Requirements
